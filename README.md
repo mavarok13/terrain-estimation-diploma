@@ -158,13 +158,3 @@ This reduces the risk of the network learning a simple darkness-to-height shortc
 3. Two-image sunrise/sunset fusion.
 4. Classification-regression head inspired by TSE-Net.
 5. Teacher-student and pseudo-label filtering for semi-supervised learning.
-
-## Blender Note
-
-This MVP uses a fast NumPy/OpenCV generator instead of Blender for faster iteration.
-
-If later you want a Blender generator, the expected command format is:
-
-```bash
-blender --background --python path/to/generator.py
-```
