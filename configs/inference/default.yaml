@@ -1,0 +1,14 @@
+dataset:
+  image_size: 480
+  use_pair: false
+  use_metadata: true
+  metadata_keys:
+    - sun_azimuth_deg
+    - sun_elevation_deg
+    - camera_azimuth_deg
+    - camera_pitch_deg
+    - camera_roll_deg
+    - camera_altitude_m
+    - camera_fov_deg
+inference:
+  output_dir: outputs/inference

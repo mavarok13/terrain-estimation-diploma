@@ -1,0 +1,41 @@
+seed: 42
+dataset:
+  name: mvp_dataset
+  output_root: data/generated
+  num_samples: 240
+  image_size: 480
+  train_ratio: 0.85
+  write_alt_image: true
+terrain:
+  octave_count: 5
+  base_grid_min: 8
+  base_grid_max: 48
+  ridge_weight: 0.35
+  valley_count_min: 1
+  valley_count_max: 3
+  peak_count_min: 3
+  peak_count_max: 8
+  blur_sigma_min: 0.8
+  blur_sigma_max: 2.4
+  elevation_scale_m_min: 200.0
+  elevation_scale_m_max: 1800.0
+render:
+  ambient: 0.35
+  diffuse: 0.85
+  shadow_strength: 0.55
+  fog_strength: 0.08
+  sun_elevation_min_deg: 12.0
+  sun_elevation_max_deg: 70.0
+  alt_sun_azimuth_delta_deg_min: 90.0
+  alt_sun_azimuth_delta_deg_max: 180.0
+camera:
+  azimuth_deg_min: 0.0
+  azimuth_deg_max: 360.0
+  pitch_deg_min: 0.0
+  pitch_deg_max: 25.0
+  roll_deg_min: -5.0
+  roll_deg_max: 5.0
+  altitude_m_min: 400.0
+  altitude_m_max: 1800.0
+  fov_deg_min: 20.0
+  fov_deg_max: 65.0
