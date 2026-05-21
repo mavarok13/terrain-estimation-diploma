@@ -20,13 +20,14 @@ from src.utils.config import load_yaml_config
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a terrain height estimation model")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("--resume", type=str, default=None, help="Path to a checkpoint to resume from")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_yaml_config(args.config)
-    train_from_config(config)
+    train_from_config(config, resume_checkpoint=args.resume)
 
 
 if __name__ == "__main__":

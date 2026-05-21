@@ -99,6 +99,12 @@ The generator also writes:
 python scripts/train.py --config configs/training/mvp.yaml
 ```
 
+Resume from the last saved checkpoint:
+
+```bash
+python scripts/train.py --config configs/training/mvp.yaml --resume outputs/mvp_baseline/checkpoints/last.pt
+```
+
 Outputs are written to `outputs/mvp_baseline/`:
 
 1. `checkpoints/best.pt`

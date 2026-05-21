@@ -10,7 +10,7 @@ from tqdm import tqdm
 from src.dataset import TerrainDataset
 from src.models import UNet
 from src.training.losses import CombinedLoss
-from src.utils.io import ensure_dir, save_checkpoint, resolve_repo_path
+from src.utils.io import ensure_dir, load_checkpoint, save_checkpoint, resolve_repo_path
 from src.utils.metrics import batch_metrics, merge_metric_sums
 from src.utils.visualization import save_training_preview
 
@@ -97,7 +97,7 @@ def _run_epoch(
     return {key: value / max(total_items, 1) for key, value in metric_sums.items()}
 
 
-def train_from_config(config: dict) -> None:
+def train_from_config(config: dict, resume_checkpoint: str | Path | None = None) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     device = _device_from_config(config["training"]["device"])
     train_ds, val_ds, train_loader, val_loader = _make_dataloaders(config, repo_root)
@@ -125,6 +125,7 @@ def train_from_config(config: dict) -> None:
     output_dir = resolve_repo_path(config["training"]["output_dir"], repo_root)
     ckpt_dir = output_dir / "checkpoints"
     sample_dir = output_dir / "samples"
+    history_path = output_dir / "history.json"
     ensure_dir(ckpt_dir)
     ensure_dir(sample_dir)
 
@@ -132,8 +133,27 @@ def train_from_config(config: dict) -> None:
     history: list[dict[str, float | int]] = []
     epochs = int(config["training"]["epochs"])
     num_visualizations = int(config["training"].get("save_visualizations", 4))
+    start_epoch = 0
 
-    for epoch in range(epochs):
+    if resume_checkpoint is not None:
+        ckpt = load_checkpoint(resolve_repo_path(resume_checkpoint, repo_root), map_location=device)
+        model.load_state_dict(ckpt["model_state"])
+        optimizer.load_state_dict(ckpt["optimizer_state"])
+        start_epoch = int(ckpt["epoch"]) + 1
+        best_val = float(ckpt.get("best_val_loss", best_val))
+
+        if history_path.exists():
+            with history_path.open("r", encoding="utf-8") as handle:
+                history = json.load(handle)
+            history = history[:start_epoch]
+
+        print(f"Resuming training from epoch {start_epoch + 1}/{epochs}")
+
+    if start_epoch >= epochs:
+        print(f"Checkpoint already covers {start_epoch} epochs. Configured epochs: {epochs}. Nothing to do.")
+        return
+
+    for epoch in range(start_epoch, epochs):
         train_metrics = _run_epoch(model, train_loader, criterion, device, optimizer)
         val_metrics = _run_epoch(model, val_loader, criterion, device, optimizer=None)
 
@@ -163,7 +183,7 @@ def train_from_config(config: dict) -> None:
         epoch_sample_dir = sample_dir / f"epoch_{epoch + 1:03d}"
         save_training_preview(model, val_loader, device, epoch_sample_dir, max_items=num_visualizations)
 
-    with (output_dir / "history.json").open("w", encoding="utf-8") as handle:
+    with history_path.open("w", encoding="utf-8") as handle:
         json.dump(history, handle, indent=2)
 
     print(f"Training finished. Best validation loss: {best_val:.4f}")
