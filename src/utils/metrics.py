@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import torch
+import torch.nn.functional as F
 
 
 def _gradient_error(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
@@ -23,12 +24,16 @@ def batch_metrics(pred: torch.Tensor, target: torch.Tensor, shadow_mask: torch.T
     sq_error = (pred - target) ** 2
     shadow = (shadow_mask > 0.5).float()
     non_shadow = 1.0 - shadow
+    dilated_shadow = F.max_pool2d(shadow, kernel_size=7, stride=1, padding=3)
+    eroded_shadow = -F.max_pool2d(-shadow, kernel_size=7, stride=1, padding=3)
+    boundary = (dilated_shadow - eroded_shadow).clamp(0.0, 1.0)
     return {
         "mae": float(abs_error.mean().item()),
         "rmse": float(torch.sqrt(sq_error.mean()).item()),
         "grad_error": float(_gradient_error(pred, target).item()),
         "shadow_mae": _masked_mean(abs_error, shadow),
         "non_shadow_mae": _masked_mean(abs_error, non_shadow),
+        "boundary_mae": _masked_mean(abs_error, boundary),
     }
 
 

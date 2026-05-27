@@ -2,40 +2,47 @@ seed: 42
 dataset:
   name: mvp_dataset
   output_root: data/generated
-  num_samples: 240
+  num_samples: 250
   image_size: 480
   train_ratio: 0.85
   write_alt_image: true
 terrain:
-  octave_count: 5
-  base_grid_min: 8
-  base_grid_max: 48
-  ridge_weight: 0.35
-  valley_count_min: 1
-  valley_count_max: 3
-  peak_count_min: 3
-  peak_count_max: 8
-  blur_sigma_min: 0.8
-  blur_sigma_max: 2.4
-  elevation_scale_m_min: 200.0
-  elevation_scale_m_max: 1800.0
+  octave_count: 1
+  base_grid_min: 1
+  base_grid_max: 2
+  ridge_weight: 0.0
+  valley_count_min: 0
+  valley_count_max: 0
+  peak_count_min: 1
+  peak_count_max: 1
+  blur_sigma_min: 14.0
+  blur_sigma_max: 25.0
+  elevation_scale_m_min: 80.0
+  elevation_scale_m_max: 600.0
 render:
-  ambient: 0.35
-  diffuse: 0.85
-  shadow_strength: 0.55
-  fog_strength: 0.08
+  ambient: 0.25
+  diffuse: 0.95
+  shadow_strength: 0.75
+  fog_strength: 0.0
   sun_elevation_min_deg: 12.0
-  sun_elevation_max_deg: 70.0
-  alt_sun_azimuth_delta_deg_min: 90.0
+  sun_elevation_max_deg: 35.0
+  alt_sun_azimuth_delta_deg_min: 120.0
   alt_sun_azimuth_delta_deg_max: 180.0
 camera:
   azimuth_deg_min: 0.0
   azimuth_deg_max: 360.0
   pitch_deg_min: 0.0
-  pitch_deg_max: 25.0
-  roll_deg_min: -5.0
-  roll_deg_max: 5.0
-  altitude_m_min: 400.0
-  altitude_m_max: 1800.0
-  fov_deg_min: 20.0
-  fov_deg_max: 65.0
+  pitch_deg_max: 5.0
+  roll_deg_min: 0.0
+  roll_deg_max: 0.0
+  altitude_m_min: 800.0
+  altitude_m_max: 1200.0
+  fov_deg_min: 35.0
+  fov_deg_max: 45.0
+generation:
+  randomize_albedo_independent_of_height: true
+  same_dem_multiple_albedos: false
+  same_dem_multiple_suns: false
+  shuffle_palettes: false
+  disable_height_based_snow: true
+  albedo_noise_strength: 0.3

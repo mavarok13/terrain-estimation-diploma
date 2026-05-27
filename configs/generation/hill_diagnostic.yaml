@@ -1,0 +1,11 @@
+seed: 123
+diagnostic:
+  num_geometries: 8
+  variants_per_geometry: 1
+  image_size: 256
+  hill_types:
+    - gaussian
+  randomize_albedo: false
+  randomize_sun: false
+  generate_pairs: true
+  output_dir: data/generated/hill_diagnostic

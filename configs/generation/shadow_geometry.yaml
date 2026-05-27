@@ -1,0 +1,61 @@
+seed: 42
+dataset:
+  name: shadow_geometry_d1
+  dataset_mode: shadow_geometry
+  output_root: data/generated
+  num_samples: 500
+  image_size: 256
+  train_ratio: 0.85
+  write_alt_image: true
+terrain:
+  octave_count: 4
+  base_grid_min: 8
+  base_grid_max: 32
+  ridge_weight: 0.15
+  valley_count_min: 0
+  valley_count_max: 1
+  peak_count_min: 1
+  peak_count_max: 4
+  blur_sigma_min: 1.5
+  blur_sigma_max: 3.5
+  elevation_scale_m_min: 120.0
+  elevation_scale_m_max: 900.0
+render:
+  ambient: 0.22
+  diffuse: 0.98
+  shadow_strength: 0.86
+  fog_strength: 0.0
+  sun_elevation_min_deg: 8.0
+  sun_elevation_max_deg: 24.0
+  alt_sun_azimuth_delta_deg_min: 120.0
+  alt_sun_azimuth_delta_deg_max: 180.0
+camera:
+  azimuth_deg_min: 0.0
+  azimuth_deg_max: 360.0
+  pitch_deg_min: 0.0
+  pitch_deg_max: 0.0
+  roll_deg_min: 0.0
+  roll_deg_max: 0.0
+  altitude_m_min: 900.0
+  altitude_m_max: 1100.0
+  fov_deg_min: 40.0
+  fov_deg_max: 40.0
+shadow_geometry:
+  difficulty: 1
+  hill_shapes:
+    - circular
+    - elongated
+    - ridge
+    - plateau
+  random_albedo: true
+  include_noon: false
+  radius_min: 0.16
+  radius_max: 0.30
+  height_min: 0.45
+  height_max: 1.0
+  height_blur_sigma: 1.2
+  max_shadow_overlap: 0.01
+  elevation_scale_m_min: 120.0
+  elevation_scale_m_max: 700.0
+  sun_elevation_min_deg: 8.0
+  sun_elevation_max_deg: 24.0

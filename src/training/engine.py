@@ -7,7 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from src.dataset import TerrainDataset
+from src.dataset import TerrainDataset, resolve_input_mode
 from src.models import UNet
 from src.training.losses import CombinedLoss
 from src.utils.io import ensure_dir, load_checkpoint, save_checkpoint, resolve_repo_path
@@ -23,6 +23,7 @@ def _device_from_config(device_name: str) -> torch.device:
 
 def _make_dataloaders(config: dict, repo_root: Path) -> tuple[TerrainDataset, TerrainDataset, DataLoader, DataLoader]:
     dataset_cfg = config["dataset"]
+    input_mode = resolve_input_mode(config.get("training", {}), dataset_cfg)
     train_ds = TerrainDataset(
         root=resolve_repo_path(dataset_cfg["root"], repo_root),
         manifest_path=resolve_repo_path(dataset_cfg["train_manifest"], repo_root),
@@ -32,6 +33,7 @@ def _make_dataloaders(config: dict, repo_root: Path) -> tuple[TerrainDataset, Te
         use_metadata=bool(dataset_cfg["use_metadata"]),
         split="train",
         shadow_augmentation=bool(dataset_cfg.get("shadow_augmentation", False)),
+        input_mode=input_mode,
     )
     val_ds = TerrainDataset(
         root=resolve_repo_path(dataset_cfg["root"], repo_root),
@@ -42,6 +44,7 @@ def _make_dataloaders(config: dict, repo_root: Path) -> tuple[TerrainDataset, Te
         use_metadata=bool(dataset_cfg["use_metadata"]),
         split="val",
         shadow_augmentation=False,
+        input_mode=input_mode,
     )
     training_cfg = config["training"]
     train_loader = DataLoader(
@@ -78,6 +81,8 @@ def _run_epoch(
         inputs = batch["input"].to(device)
         targets = batch["height"].to(device)
         shadow_mask = batch["shadow_mask"].to(device)
+        if "shadow_mask_alt" in batch:
+            shadow_mask = torch.maximum(shadow_mask, batch["shadow_mask_alt"].to(device))
 
         with torch.set_grad_enabled(is_train):
             preds = model(inputs)
@@ -103,7 +108,10 @@ def train_from_config(config: dict, resume_checkpoint: str | Path | None = None)
     train_ds, val_ds, train_loader, val_loader = _make_dataloaders(config, repo_root)
 
     dataset_cfg = config["dataset"]
-    input_channels = 3 * (2 if dataset_cfg["use_pair"] else 1) + (train_ds.metadata_dim if dataset_cfg["use_metadata"] else 0)
+    input_mode = resolve_input_mode(config.get("training", {}), dataset_cfg)
+    input_channels = train_ds.input_channels
+    config.setdefault("training", {})["input_mode"] = input_mode
+    config.setdefault("model", {})["input_channels"] = input_channels
     model = UNet(
         in_channels=input_channels,
         out_channels=1,
@@ -128,6 +136,11 @@ def train_from_config(config: dict, resume_checkpoint: str | Path | None = None)
     history_path = output_dir / "history.json"
     ensure_dir(ckpt_dir)
     ensure_dir(sample_dir)
+
+    print(
+        f"Training input_mode={input_mode} input_channels={input_channels} "
+        f"train_samples={len(train_ds)} val_samples={len(val_ds)} output_dir={output_dir}"
+    )
 
     best_val = float("inf")
     history: list[dict[str, float | int]] = []
@@ -182,6 +195,9 @@ def train_from_config(config: dict, resume_checkpoint: str | Path | None = None)
 
         epoch_sample_dir = sample_dir / f"epoch_{epoch + 1:03d}"
         save_training_preview(model, val_loader, device, epoch_sample_dir, max_items=num_visualizations)
+
+        with history_path.open("w", encoding="utf-8") as handle:
+            json.dump(history, handle, indent=2)
 
     with history_path.open("w", encoding="utf-8") as handle:
         json.dump(history, handle, indent=2)

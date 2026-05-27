@@ -11,6 +11,14 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
+from src.dataset.input_modes import (
+    build_model_input_for_mode,
+    encode_pair_metadata_maps,
+    encode_sun_metadata_maps,
+    input_channels_for_mode,
+    input_mode_requires_metadata,
+    input_mode_requires_pair,
+)
 from src.utils.metadata import encode_metadata_vector, encoded_metadata_size
 
 
@@ -21,6 +29,7 @@ class SampleRecord:
     image_alt_path: Path | None
     height_path: Path
     shadow_path: Path
+    shadow_alt_path: Path | None
     meta_path: Path
 
 
@@ -70,18 +79,32 @@ class TerrainDataset(Dataset):
         use_metadata: bool,
         split: str,
         shadow_augmentation: bool = False,
+        input_mode: str = "rgb",
     ) -> None:
         self.root = Path(root)
         self.manifest_path = Path(manifest_path)
         self.image_size = int(image_size)
         self.metadata_keys = list(metadata_keys)
-        self.use_pair = bool(use_pair)
-        self.use_metadata = bool(use_metadata)
+        self.input_mode = input_mode
+        self.use_pair = bool(use_pair) or input_mode_requires_pair(input_mode)
+        self.use_metadata = bool(use_metadata) or input_mode_requires_metadata(input_mode)
         self.split = split
         self.shadow_augmentation = bool(shadow_augmentation and split == "train")
 
         self.records = self._load_records()
-        self.metadata_dim = encoded_metadata_size(self.metadata_keys) if self.use_metadata else 0
+        self.input_channels = input_channels_for_mode(self.input_mode, self.metadata_keys)
+        self.metadata_dim = self._metadata_dim()
+
+    def _metadata_dim(self) -> int:
+        if self.input_mode == "rgb_pair_metadata":
+            return 4
+        if self.input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun"}:
+            return 4
+        if self.input_mode == "grayscale_shadow_sun":
+            return 2
+        if self.input_mode == "rgb_pair_full_metadata":
+            return encoded_metadata_size(self.metadata_keys)
+        return 0
 
     def _load_records(self) -> list[SampleRecord]:
         if not self.manifest_path.exists():
@@ -93,6 +116,7 @@ class TerrainDataset(Dataset):
             for row in reader:
                 sample_dir = self.root / row["sample_dir"]
                 image_alt_rel = row.get("image_alt_relpath", "").strip()
+                shadow_alt_rel = row.get("shadow_alt_relpath", "").strip()
                 records.append(
                     SampleRecord(
                         sample_id=row["sample_id"],
@@ -100,6 +124,7 @@ class TerrainDataset(Dataset):
                         image_alt_path=(sample_dir / image_alt_rel) if image_alt_rel else None,
                         height_path=sample_dir / row["height_relpath"],
                         shadow_path=sample_dir / row["shadow_relpath"],
+                        shadow_alt_path=(sample_dir / shadow_alt_rel) if shadow_alt_rel else None,
                         meta_path=sample_dir / row["meta_relpath"],
                     )
                 )
@@ -129,6 +154,7 @@ class TerrainDataset(Dataset):
         record = self.records[index]
         image = _read_rgb(record.image_path, self.image_size)
         shadow_mask = _read_mask(record.shadow_path, self.image_size)
+        shadow_mask_alt = _read_mask(record.shadow_alt_path, self.image_size) if record.shadow_alt_path is not None else None
         height = _read_height(record.height_path, self.image_size)
 
         image_alt = None
@@ -142,20 +168,35 @@ class TerrainDataset(Dataset):
             image = self._augment_shadow_response(image, shadow_mask)
             if image_alt is not None:
                 image_alt = self._augment_image(image_alt)
+                if shadow_mask_alt is not None:
+                    image_alt = self._augment_shadow_response(image_alt, shadow_mask_alt)
 
         with record.meta_path.open("r", encoding="utf-8") as handle:
             meta = json.load(handle)
 
         metadata = None
-        if self.use_metadata:
-            metadata_np = encode_metadata_vector(meta, self.metadata_keys)
-            metadata = torch.from_numpy(metadata_np)
+        if self.input_mode == "grayscale_shadow_sun":
+            metadata = encode_sun_metadata_maps(meta)
+        elif self.input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun"}:
+            metadata = encode_pair_metadata_maps(meta)
+        elif self.input_mode == "rgb_pair_metadata":
+            metadata = encode_pair_metadata_maps(meta)
+        elif self.input_mode == "rgb_pair_full_metadata":
+            metadata = torch.from_numpy(encode_metadata_vector(meta, self.metadata_keys))
 
         image_t = torch.from_numpy(image.transpose(2, 0, 1)).float()
         image_alt_t = torch.from_numpy(image_alt.transpose(2, 0, 1)).float() if image_alt is not None else None
         height_t = torch.from_numpy(height[None, ...]).float()
         shadow_t = torch.from_numpy(shadow_mask[None, ...]).float()
-        model_input = build_model_input(image_t, image_alt_t, metadata)
+        shadow_alt_t = torch.from_numpy(shadow_mask_alt[None, ...]).float() if shadow_mask_alt is not None else None
+        model_input = build_model_input_for_mode(
+            image_t,
+            image_alt_t,
+            metadata,
+            self.input_mode,
+            shadow_mask=shadow_t,
+            shadow_mask_alt=shadow_alt_t,
+        )
 
         output: dict[str, torch.Tensor | str] = {
             "input": model_input,
@@ -166,6 +207,8 @@ class TerrainDataset(Dataset):
         }
         if image_alt_t is not None:
             output["image_alt"] = image_alt_t
+        if shadow_alt_t is not None:
+            output["shadow_mask_alt"] = shadow_alt_t
         if metadata is not None:
             output["metadata"] = metadata
         return output

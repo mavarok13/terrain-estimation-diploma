@@ -147,29 +147,57 @@ def _shadow_mask(height: np.ndarray, azimuth_deg: float, elevation_deg: float) -
     return shadow.astype(np.float32)
 
 
-def _render_rgb(height: np.ndarray, normals: np.ndarray, azimuth_deg: float, elevation_deg: float, render_cfg: dict, rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    sun = _sun_vector(azimuth_deg, elevation_deg)
-    diffuse = np.clip(np.sum(normals * sun[None, None, :], axis=-1), 0.0, 1.0)
-    shadow = _shadow_mask(height, azimuth_deg, elevation_deg)
-
+def _terrain_albedo(
+    height: np.ndarray,
+    normals: np.ndarray,
+    generation_cfg: dict | None,
+    rng: np.random.Generator,
+) -> np.ndarray:
     slope = 1.0 - np.clip(normals[..., 2], 0.0, 1.0)
     color_noise = _sample_fractal_noise(height.shape[0], 3, 10, 24, rng)
     color_noise = _normalize(color_noise)
 
+    generation_cfg = generation_cfg or {}
     green = np.array([0.24, 0.42, 0.18], dtype=np.float32)
     brown = np.array([0.48, 0.40, 0.24], dtype=np.float32)
     rock = np.array([0.52, 0.50, 0.48], dtype=np.float32)
     snow = np.array([0.86, 0.88, 0.90], dtype=np.float32)
+    if bool(generation_cfg.get("shuffle_palettes", False)):
+        palette = [green, brown, rock]
+        rng.shuffle(palette)
+        green, brown, rock = palette
 
-    lowland_mix = height[..., None]
+    if bool(generation_cfg.get("randomize_albedo_independent_of_height", False)):
+        lowland_mix = _normalize(_sample_fractal_noise(height.shape[0], 4, 4, 18, rng))[..., None]
+    else:
+        lowland_mix = height[..., None]
     slope_mix = slope[..., None]
     albedo = (1.0 - lowland_mix) * green + lowland_mix * brown
     albedo = (1.0 - slope_mix) * albedo + slope_mix * rock
-    snow_mask = np.clip((height - 0.78) / 0.18, 0.0, 1.0)[..., None]
-    albedo = (1.0 - snow_mask) * albedo + snow_mask * snow
+    if not bool(generation_cfg.get("disable_height_based_snow", False)):
+        snow_mask = np.clip((height - 0.78) / 0.18, 0.0, 1.0)[..., None]
+        albedo = (1.0 - snow_mask) * albedo + snow_mask * snow
 
-    tint = 0.85 + 0.3 * color_noise[..., None]
-    albedo = np.clip(albedo * tint, 0.0, 1.0)
+    noise_strength = float(generation_cfg.get("albedo_noise_strength", 0.3))
+    tint = 1.0 - 0.5 * noise_strength + noise_strength * color_noise[..., None]
+    return np.clip(albedo * tint, 0.0, 1.0)
+
+
+def _render_rgb(
+    height: np.ndarray,
+    normals: np.ndarray,
+    azimuth_deg: float,
+    elevation_deg: float,
+    render_cfg: dict,
+    rng: np.random.Generator,
+    generation_cfg: dict | None = None,
+    albedo: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    sun = _sun_vector(azimuth_deg, elevation_deg)
+    diffuse = np.clip(np.sum(normals * sun[None, None, :], axis=-1), 0.0, 1.0)
+    shadow = _shadow_mask(height, azimuth_deg, elevation_deg)
+    if albedo is None:
+        albedo = _terrain_albedo(height, normals, generation_cfg, rng)
 
     ambient = float(render_cfg["ambient"])
     diffuse_weight = float(render_cfg["diffuse"])
@@ -195,6 +223,10 @@ def _save_png(path: Path, image: np.ndarray) -> None:
         Image.fromarray(arr, mode="RGB").save(path)
 
 
+def _rgb_to_luma(rgb: np.ndarray) -> np.ndarray:
+    return np.clip(0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2], 0.0, 1.0).astype(np.float32)
+
+
 def _metadata_for_sample(sample_id: str, terrain_meta: dict, capture_meta: dict) -> dict:
     meta = {
         "sample_id": sample_id,
@@ -206,6 +238,225 @@ def _metadata_for_sample(sample_id: str, terrain_meta: dict, capture_meta: dict)
     return meta
 
 
+def _shadow_geometry_albedo(size: int, rng: np.random.Generator, random_albedo: bool) -> np.ndarray:
+    if not random_albedo:
+        return np.full((size, size, 3), 0.72, dtype=np.float32)
+    albedo = rng.uniform(0.45, 0.9, size=(8, 8)).astype(np.float32)
+    albedo = cv2.resize(albedo, (size, size), interpolation=cv2.INTER_CUBIC)
+    albedo = cv2.GaussianBlur(albedo, (0, 0), sigmaX=max(2.0, size / 24.0), sigmaY=max(2.0, size / 24.0))
+    albedo = 0.55 + 0.3 * _normalize(albedo)
+    return np.repeat(albedo[..., None], 3, axis=-1).astype(np.float32)
+
+
+def _shadow_geometry_height(
+    size: int,
+    cfg: dict,
+    terrain_cfg: dict,
+    rng: np.random.Generator,
+    shadow_suns: list[tuple[float, float]] | None = None,
+) -> tuple[np.ndarray, dict]:
+    difficulty = int(cfg.get("difficulty", 1))
+    if difficulty >= 3:
+        height, meta = _terrain_height(size, terrain_cfg, rng)
+        meta.update({"dataset_mode": "shadow_geometry", "difficulty": difficulty, "curriculum_stage": "procedural"})
+        return height, meta
+
+    max_hills = 1 if difficulty == 1 else 3
+    min_hills = 1 if difficulty == 1 else 2
+    hill_count = int(rng.integers(min_hills, max_hills + 1))
+    shapes = list(cfg.get("hill_shapes", ["circular", "elongated", "ridge", "plateau"]))
+    yy, xx = np.mgrid[-1:1:complex(0, size), -1:1:complex(0, size)].astype(np.float32)
+    height = np.zeros((size, size), dtype=np.float32)
+    hills: list[dict] = []
+    individual_shadow_masks: list[list[np.ndarray]] = []
+    min_sep_factor = 2.6 if difficulty == 1 else 1.55
+    max_shadow_overlap = float(cfg.get("max_shadow_overlap", 0.01 if difficulty == 1 else 0.08))
+
+    for hill_idx in range(hill_count):
+        accepted_profile = None
+        accepted_hill = None
+        accepted_shadows = None
+        for _ in range(120):
+            radius = float(rng.uniform(float(cfg.get("radius_min", 0.16)), float(cfg.get("radius_max", 0.30))))
+            cx = float(rng.uniform(-0.52, 0.52))
+            cy = float(rng.uniform(-0.52, 0.52))
+            if not all(np.hypot(cx - h["center"][0], cy - h["center"][1]) > min_sep_factor * (radius + h["radius"]) for h in hills):
+                continue
+
+            shape = str(shapes[(hill_idx + int(rng.integers(0, len(shapes)))) % len(shapes)])
+            orientation = float(rng.uniform(0.0, np.pi))
+            hill_height = float(rng.uniform(float(cfg.get("height_min", 0.45)), float(cfg.get("height_max", 1.0))))
+            dx = xx - cx
+            dy = yy - cy
+            xr = np.cos(orientation) * dx + np.sin(orientation) * dy
+            yr = -np.sin(orientation) * dx + np.cos(orientation) * dy
+
+            if shape == "circular":
+                profile = np.exp(-((dx * dx + dy * dy) / (2.0 * radius * radius)))
+            elif shape == "elongated":
+                profile = np.exp(-((xr * xr) / (2.0 * (radius * 1.45) ** 2) + (yr * yr) / (2.0 * (radius * 0.55) ** 2)))
+            elif shape == "ridge":
+                profile = np.exp(-((xr * xr) / (2.0 * (radius * 2.0) ** 2) + (yr * yr) / (2.0 * (radius * 0.30) ** 2)))
+            elif shape == "plateau":
+                rho = np.sqrt((xr / max(radius, 1e-6)) ** 2 + (yr / max(radius * 0.85, 1e-6)) ** 2)
+                profile = 1.0 / (1.0 + np.exp((rho - 0.72) / 0.08))
+            else:
+                raise ValueError(f"Unsupported shadow_geometry hill shape: {shape}")
+
+            candidate = (hill_height * profile).astype(np.float32)
+            candidate_shadows = []
+            for azimuth, elevation in shadow_suns or []:
+                candidate_shadows.append(_shadow_mask(candidate, azimuth, elevation) > 0.5)
+            overlaps = []
+            for existing_per_sun in individual_shadow_masks:
+                for sun_idx, candidate_shadow in enumerate(candidate_shadows):
+                    existing_shadow = existing_per_sun[sun_idx]
+                    denom = max(float(candidate_shadow.sum()), 1.0)
+                    overlaps.append(float(np.logical_and(candidate_shadow, existing_shadow).sum()) / denom)
+            if overlaps and max(overlaps) > max_shadow_overlap:
+                continue
+
+            accepted_profile = candidate
+            accepted_hill = {"shape": shape, "center": [cx, cy], "radius": radius, "height": hill_height, "orientation_rad": orientation}
+            accepted_shadows = candidate_shadows
+            break
+
+        if accepted_profile is None or accepted_hill is None or accepted_shadows is None:
+            continue
+        height = np.maximum(height, accepted_profile)
+        hills.append(accepted_hill)
+        individual_shadow_masks.append(accepted_shadows)
+
+    height = cv2.GaussianBlur(height, (0, 0), sigmaX=float(cfg.get("height_blur_sigma", 1.2)), sigmaY=float(cfg.get("height_blur_sigma", 1.2)))
+    height = np.clip(height, 0.0, 1.0).astype(np.float32)
+    elevation_scale_m = float(rng.uniform(float(cfg.get("elevation_scale_m_min", 120.0)), float(cfg.get("elevation_scale_m_max", 700.0))))
+    return height, {
+        "dataset_mode": "shadow_geometry",
+        "difficulty": difficulty,
+        "curriculum_stage": "controlled_hills",
+        "hill_count": len(hills),
+        "hills": hills,
+        "elevation_scale_m": elevation_scale_m,
+    }
+
+
+def _write_manifest_files(dataset_root: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> None:
+    for filename, subset in (
+        ("manifest.csv", rows),
+        ("train.csv", [row for row in rows if row["split"] == "train"]),
+        ("val.csv", [row for row in rows if row["split"] == "val"]),
+    ):
+        with (dataset_root / filename).open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(subset)
+
+
+def _generate_shadow_geometry_dataset(config: dict, rng: np.random.Generator, dataset_root: Path, samples_root: Path) -> None:
+    dataset_cfg = config["dataset"]
+    terrain_cfg = config["terrain"]
+    render_cfg = dict(config["render"])
+    camera_cfg = config["camera"]
+    shadow_cfg = config.get("shadow_geometry", {})
+
+    manifest_rows: list[dict[str, str]] = []
+    num_samples = int(dataset_cfg["num_samples"])
+    image_size = int(dataset_cfg["image_size"])
+    train_ratio = float(dataset_cfg["train_ratio"])
+    include_noon = bool(shadow_cfg.get("include_noon", False))
+    random_albedo = bool(shadow_cfg.get("random_albedo", False))
+
+    render_cfg.setdefault("ambient", 0.24)
+    render_cfg.setdefault("diffuse", 0.95)
+    render_cfg.setdefault("shadow_strength", 0.82)
+    render_cfg.setdefault("fog_strength", 0.0)
+
+    for index in tqdm(range(num_samples), desc="Generating shadow geometry dataset"):
+        sample_id = f"sample_{index:05d}"
+        sample_dir = samples_root / sample_id
+        ensure_dir(sample_dir)
+
+        sunrise_az = float((90.0 + rng.uniform(-35.0, 35.0)) % 360.0)
+        sunset_az = float((270.0 + rng.uniform(-35.0, 35.0)) % 360.0)
+        low_el_min = float(shadow_cfg.get("sun_elevation_min_deg", render_cfg.get("sun_elevation_min_deg", 8.0)))
+        low_el_max = float(shadow_cfg.get("sun_elevation_max_deg", render_cfg.get("sun_elevation_max_deg", 28.0)))
+        sunrise_el = float(rng.uniform(low_el_min, low_el_max))
+        sunset_el = float(rng.uniform(low_el_min, low_el_max))
+
+        height, terrain_meta = _shadow_geometry_height(
+            image_size,
+            shadow_cfg,
+            terrain_cfg,
+            rng,
+            shadow_suns=[(sunrise_az, sunrise_el), (sunset_az, sunset_el)],
+        )
+        normals = _compute_normals(height, z_scale=float(terrain_meta["elevation_scale_m"]) / 1000.0)
+        albedo = _shadow_geometry_albedo(image_size, rng, random_albedo)
+
+        rgb, shadow = _render_rgb(height, normals, sunrise_az, sunrise_el, render_cfg, rng, albedo=albedo)
+        rgb_alt, shadow_alt = _render_rgb(height, normals, sunset_az, sunset_el, render_cfg, rng, albedo=albedo)
+        gray = _rgb_to_luma(rgb)
+        gray_alt = _rgb_to_luma(rgb_alt)
+
+        _save_png(sample_dir / "gray.png", gray)
+        _save_png(sample_dir / "gray_alt.png", gray_alt)
+        _save_png(sample_dir / "shadow_mask.png", shadow)
+        _save_png(sample_dir / "shadow_mask_alt.png", shadow_alt)
+        if include_noon:
+            noon_az = float(rng.uniform(0.0, 360.0))
+            noon_el = float(rng.uniform(55.0, 75.0))
+            rgb_noon, shadow_noon = _render_rgb(height, normals, noon_az, noon_el, render_cfg, rng, albedo=albedo)
+            _save_png(sample_dir / "gray_noon.png", _rgb_to_luma(rgb_noon))
+            _save_png(sample_dir / "shadow_mask_noon.png", shadow_noon)
+        else:
+            noon_az = 0.0
+            noon_el = 0.0
+
+        np.save(sample_dir / "height.npy", height.astype(np.float32))
+        _save_png(sample_dir / "height_vis.png", height)
+        np.save(sample_dir / "normal.npy", normals.astype(np.float32))
+
+        camera_meta = {
+            "sun_azimuth_deg": sunrise_az,
+            "sun_elevation_deg": sunrise_el,
+            "sun_azimuth_alt_deg": sunset_az,
+            "sun_elevation_alt_deg": sunset_el,
+            "sun_azimuth_noon_deg": noon_az,
+            "sun_elevation_noon_deg": noon_el,
+            "camera_azimuth_deg": float(rng.uniform(float(camera_cfg["azimuth_deg_min"]), float(camera_cfg["azimuth_deg_max"]))),
+            "camera_pitch_deg": float(rng.uniform(float(camera_cfg["pitch_deg_min"]), float(camera_cfg["pitch_deg_max"]))),
+            "camera_roll_deg": float(rng.uniform(float(camera_cfg["roll_deg_min"]), float(camera_cfg["roll_deg_max"]))),
+            "camera_altitude_m": float(rng.uniform(float(camera_cfg["altitude_m_min"]), float(camera_cfg["altitude_m_max"]))),
+            "camera_fov_deg": float(rng.uniform(float(camera_cfg["fov_deg_min"]), float(camera_cfg["fov_deg_max"]))),
+            "timestamp": f"shadow_geometry_{index:05d}",
+            "image_size": image_size,
+            "random_albedo": random_albedo,
+            "lighting_setup": "sunrise_sunset_noon" if include_noon else "sunrise_sunset",
+        }
+        meta = _metadata_for_sample(sample_id, terrain_meta, camera_meta)
+        with (sample_dir / "meta.json").open("w", encoding="utf-8") as handle:
+            json.dump(meta, handle, indent=2)
+
+        split = "train" if index < int(round(num_samples * train_ratio)) else "val"
+        manifest_rows.append(
+            {
+                "sample_id": sample_id,
+                "split": split,
+                "sample_dir": f"samples/{sample_id}",
+                "image_relpath": "gray.png",
+                "image_alt_relpath": "gray_alt.png",
+                "height_relpath": "height.npy",
+                "shadow_relpath": "shadow_mask.png",
+                "shadow_alt_relpath": "shadow_mask_alt.png",
+                "meta_relpath": "meta.json",
+            }
+        )
+
+    fieldnames = ["sample_id", "split", "sample_dir", "image_relpath", "image_alt_relpath", "height_relpath", "shadow_relpath", "shadow_alt_relpath", "meta_relpath"]
+    _write_manifest_files(dataset_root, fieldnames, manifest_rows)
+    print(f"Shadow geometry dataset generated at: {dataset_root}")
+
+
 def generate_dataset(config: dict) -> None:
     seed = int(config["seed"])
     rng = np.random.default_rng(seed)
@@ -214,6 +465,7 @@ def generate_dataset(config: dict) -> None:
     terrain_cfg = config["terrain"]
     render_cfg = config["render"]
     camera_cfg = config["camera"]
+    generation_cfg = config.get("generation", {})
 
     repo_root = Path(__file__).resolve().parents[2]
     output_root = resolve_repo_path(dataset_cfg["output_root"], repo_root)
@@ -221,18 +473,33 @@ def generate_dataset(config: dict) -> None:
     samples_root = dataset_root / "samples"
     ensure_dir(samples_root)
 
+    if str(dataset_cfg.get("dataset_mode", "")).lower() == "shadow_geometry":
+        _generate_shadow_geometry_dataset(config, rng, dataset_root, samples_root)
+        return
+
     manifest_rows: list[dict[str, str]] = []
     num_samples = int(dataset_cfg["num_samples"])
     image_size = int(dataset_cfg["image_size"])
     train_ratio = float(dataset_cfg["train_ratio"])
     write_alt_image = bool(dataset_cfg["write_alt_image"])
 
+    variants_per_dem = 1
+    if bool(generation_cfg.get("same_dem_multiple_albedos", False)):
+        variants_per_dem *= 2
+    if bool(generation_cfg.get("same_dem_multiple_suns", False)):
+        variants_per_dem *= 2
+    cached_height = None
+    cached_terrain_meta = None
+
     for index in tqdm(range(num_samples), desc="Generating terrain dataset"):
         sample_id = f"sample_{index:05d}"
         sample_dir = samples_root / sample_id
         ensure_dir(sample_dir)
 
-        height, terrain_meta = _terrain_height(image_size, terrain_cfg, rng)
+        if cached_height is None or index % variants_per_dem == 0:
+            cached_height, cached_terrain_meta = _terrain_height(image_size, terrain_cfg, rng)
+        height = cached_height.copy()
+        terrain_meta = dict(cached_terrain_meta)
         normals = _compute_normals(height, z_scale=terrain_meta["elevation_scale_m"] / 1000.0)
 
         sun_azimuth = float(rng.uniform(0.0, 360.0))
@@ -246,10 +513,21 @@ def generate_dataset(config: dict) -> None:
         sun_azimuth_alt = (sun_azimuth + alt_delta) % 360.0
         sun_elevation_alt = float(rng.uniform(float(render_cfg["sun_elevation_min_deg"]), float(render_cfg["sun_elevation_max_deg"])))
 
-        rgb, shadow = _render_rgb(height, normals, sun_azimuth, sun_elevation, render_cfg, rng)
+        albedo = _terrain_albedo(height, normals, generation_cfg, rng)
+        rgb, shadow = _render_rgb(height, normals, sun_azimuth, sun_elevation, render_cfg, rng, generation_cfg, albedo=albedo)
         rgb_alt = None
+        shadow_alt = None
         if write_alt_image:
-            rgb_alt, _ = _render_rgb(height, normals, sun_azimuth_alt, sun_elevation_alt, render_cfg, rng)
+            rgb_alt, shadow_alt = _render_rgb(
+                height,
+                normals,
+                sun_azimuth_alt,
+                sun_elevation_alt,
+                render_cfg,
+                rng,
+                generation_cfg,
+                albedo=albedo,
+            )
 
         camera_meta = {
             "sun_azimuth_deg": sun_azimuth,
@@ -270,6 +548,8 @@ def generate_dataset(config: dict) -> None:
         _save_png(sample_dir / "rgb.png", rgb)
         if rgb_alt is not None:
             _save_png(sample_dir / "rgb_alt.png", rgb_alt)
+        if shadow_alt is not None:
+            _save_png(sample_dir / "shadow_mask_alt.png", shadow_alt)
         np.save(sample_dir / "height.npy", height.astype(np.float32))
         _save_png(sample_dir / "height_vis.png", height)
         np.save(sample_dir / "normal.npy", normals.astype(np.float32))
@@ -287,6 +567,7 @@ def generate_dataset(config: dict) -> None:
                 "image_alt_relpath": "rgb_alt.png" if write_alt_image else "",
                 "height_relpath": "height.npy",
                 "shadow_relpath": "shadow_mask.png",
+                "shadow_alt_relpath": "shadow_mask_alt.png" if write_alt_image else "",
                 "meta_relpath": "meta.json",
             }
         )
@@ -299,6 +580,7 @@ def generate_dataset(config: dict) -> None:
         "image_alt_relpath",
         "height_relpath",
         "shadow_relpath",
+        "shadow_alt_relpath",
         "meta_relpath",
     ]
 
