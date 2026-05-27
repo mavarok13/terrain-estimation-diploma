@@ -14,18 +14,20 @@ def _bootstrap_path() -> None:
 _bootstrap_path()
 
 from src.generation.procedural import generate_dataset
-from src.utils.config import load_yaml_config
+from src.utils.config import apply_dot_overrides, load_yaml_config
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate a procedural terrain dataset")
     parser.add_argument("--config", type=str, required=True)
+    parser.add_argument("overrides", nargs="*", help="Dot overrides, e.g. dataset.num_samples=16")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_yaml_config(args.config)
+    apply_dot_overrides(config, args.overrides)
     generate_dataset(config)
 
 

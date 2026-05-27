@@ -14,19 +14,21 @@ def _bootstrap_path() -> None:
 _bootstrap_path()
 
 from src.training.engine import train_from_config
-from src.utils.config import load_yaml_config
+from src.utils.config import apply_dot_overrides, load_yaml_config
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train a terrain height estimation model")
     parser.add_argument("--config", type=str, required=True)
     parser.add_argument("--resume", type=str, default=None, help="Path to a checkpoint to resume from")
+    parser.add_argument("overrides", nargs="*", help="Dot overrides, e.g. training.input_mode=rgb")
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config = load_yaml_config(args.config)
+    apply_dot_overrides(config, args.overrides)
     train_from_config(config, resume_checkpoint=args.resume)
 
 
