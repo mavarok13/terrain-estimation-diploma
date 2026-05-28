@@ -80,7 +80,7 @@ def run_inference(
             meta = json.load(handle)
         if input_mode == "grayscale_shadow_sun":
             metadata_t = encode_sun_metadata_maps(meta)
-        elif input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun", "rgb_pair_metadata"}:
+        elif input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun", "rgb_pair_shadowmask_sun", "rgb_pair_metadata"}:
             metadata_t = encode_pair_metadata_maps(meta)
         else:
             metadata_t = torch.from_numpy(encode_metadata_vector(meta, metadata_keys))
@@ -91,7 +91,7 @@ def run_inference(
         if shadow_mask_path is None:
             raise ValueError(f"{input_mode} requires --shadow-mask")
         shadow_mask_t = _read_mask(resolve_repo_path(shadow_mask_path, repo_root), image_size)
-        if input_mode == "grayscale_pair_shadowmask_sun":
+        if input_mode in {"grayscale_pair_shadowmask_sun", "rgb_pair_shadowmask_sun"}:
             if shadow_mask_alt_path is None:
                 raise ValueError(f"{input_mode} requires --shadow-mask-alt")
             shadow_mask_alt_t = _read_mask(resolve_repo_path(shadow_mask_alt_path, repo_root), image_size)

@@ -1,7 +1,7 @@
 seed: 42
 dataset:
-  name: shadow_geometry_d1
-  dataset_mode: shadow_geometry
+  name: simple_geometry_d3_nr
+  dataset_mode: rgb_shadow_geometry
   output_root: data/generated
   num_samples: 500
   image_size: 256
@@ -21,10 +21,12 @@ terrain:
   elevation_scale_m_min: 120.0
   elevation_scale_m_max: 900.0
 render:
-  ambient: 0.22
-  diffuse: 0.98
-  shadow_strength: 0.86
-  fog_strength: 0.0
+  ambient: 0.27
+  diffuse: 1.6
+  shadow_strength: 0.39
+  fog_strength: 0.1
+  exposure: 1.05
+  gamma: 0.83
   sun_elevation_min_deg: 8.0
   sun_elevation_max_deg: 24.0
   alt_sun_azimuth_delta_deg_min: 120.0
@@ -41,22 +43,22 @@ camera:
   fov_deg_min: 40.0
   fov_deg_max: 40.0
 shadow_geometry:
-  difficulty: 1
+  difficulty: 3
   hill_shapes:
     - circular
     - elongated
     - ridge
     - plateau
-  random_albedo: true
-  albedo_tint_min: 0.30
-  albedo_tint_max: 1.00
-  albedo_brightness_min: 0.50
-  albedo_brightness_max: 1.45
-  albedo_contrast_min: 0.45
-  albedo_contrast_max: 1.70
-  albedo_pattern_strength: 0.70
-  albedo_noise_strength: 0.05
-  albedo_noise_texture: true
+  albedo:
+    mode: height_based
+    height_color_strength: 0.45
+    color_noise_strength: 0.07
+    texture_strength: 0.14
+    height_color_palette:
+      low: [0.16, 0.30, 0.14]
+      mid: [0.36, 0.52, 0.20]
+      high: [0.56, 0.47, 0.27]
+      very_high: [0.72, 0.69, 0.60]
   include_noon: false
   radius_min: 0.16
   radius_max: 0.30

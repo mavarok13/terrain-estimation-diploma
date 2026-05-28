@@ -98,7 +98,7 @@ class TerrainDataset(Dataset):
     def _metadata_dim(self) -> int:
         if self.input_mode == "rgb_pair_metadata":
             return 4
-        if self.input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun"}:
+        if self.input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun", "rgb_pair_shadowmask_sun"}:
             return 4
         if self.input_mode == "grayscale_shadow_sun":
             return 2
@@ -115,12 +115,20 @@ class TerrainDataset(Dataset):
             reader = csv.DictReader(handle)
             for row in reader:
                 sample_dir = self.root / row["sample_dir"]
+                image_rel = row["image_relpath"].strip()
                 image_alt_rel = row.get("image_alt_relpath", "").strip()
                 shadow_alt_rel = row.get("shadow_alt_relpath", "").strip()
+                if self.input_mode == "rgb_pair_shadowmask_sun":
+                    rgb_path = sample_dir / "rgb.png"
+                    rgb_alt_path = sample_dir / "rgb_alt.png"
+                    if rgb_path.exists():
+                        image_rel = "rgb.png"
+                    if rgb_alt_path.exists():
+                        image_alt_rel = "rgb_alt.png"
                 records.append(
                     SampleRecord(
                         sample_id=row["sample_id"],
-                        image_path=sample_dir / row["image_relpath"],
+                        image_path=sample_dir / image_rel,
                         image_alt_path=(sample_dir / image_alt_rel) if image_alt_rel else None,
                         height_path=sample_dir / row["height_relpath"],
                         shadow_path=sample_dir / row["shadow_relpath"],
@@ -177,7 +185,7 @@ class TerrainDataset(Dataset):
         metadata = None
         if self.input_mode == "grayscale_shadow_sun":
             metadata = encode_sun_metadata_maps(meta)
-        elif self.input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun"}:
+        elif self.input_mode in {"grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun", "rgb_pair_shadowmask_sun"}:
             metadata = encode_pair_metadata_maps(meta)
         elif self.input_mode == "rgb_pair_metadata":
             metadata = encode_pair_metadata_maps(meta)

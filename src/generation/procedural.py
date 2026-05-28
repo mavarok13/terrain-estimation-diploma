@@ -203,6 +203,8 @@ def _render_rgb(
     diffuse_weight = float(render_cfg["diffuse"])
     shadow_strength = float(render_cfg["shadow_strength"])
     fog_strength = float(render_cfg["fog_strength"])
+    exposure = float(render_cfg.get("exposure", 1.0))
+    gamma = float(render_cfg.get("gamma", 1.0))
 
     light_term = ambient + diffuse_weight * diffuse
     light_term *= 1.0 - shadow_strength * shadow
@@ -211,6 +213,9 @@ def _render_rgb(
     fog = fog_strength * (1.0 - diffuse)[..., None]
     sky_tint = np.array([0.62, 0.72, 0.86], dtype=np.float32)
     rgb = rgb * (1.0 - fog) + sky_tint * fog
+    rgb = np.clip(rgb * exposure, 0.0, 1.0)
+    if abs(gamma - 1.0) > 1e-6:
+        rgb = np.power(rgb, gamma)
     return np.clip(rgb, 0.0, 1.0), shadow
 
 
@@ -238,14 +243,159 @@ def _metadata_for_sample(sample_id: str, terrain_meta: dict, capture_meta: dict)
     return meta
 
 
-def _shadow_geometry_albedo(size: int, rng: np.random.Generator, random_albedo: bool) -> np.ndarray:
-    if not random_albedo:
-        return np.full((size, size, 3), 0.72, dtype=np.float32)
-    albedo = rng.uniform(0.45, 0.9, size=(8, 8)).astype(np.float32)
-    albedo = cv2.resize(albedo, (size, size), interpolation=cv2.INTER_CUBIC)
-    albedo = cv2.GaussianBlur(albedo, (0, 0), sigmaX=max(2.0, size / 24.0), sigmaY=max(2.0, size / 24.0))
-    albedo = 0.55 + 0.3 * _normalize(albedo)
-    return np.repeat(albedo[..., None], 3, axis=-1).astype(np.float32)
+def _shadow_albedo_options(shadow_cfg: dict) -> tuple[str, dict]:
+    albedo_cfg = shadow_cfg.get("albedo", {})
+    if albedo_cfg is None:
+        albedo_cfg = {}
+    if not isinstance(albedo_cfg, dict):
+        raise ValueError("shadow_geometry.albedo must be a mapping when provided")
+
+    mode = str(albedo_cfg.get("mode", "")).lower().strip()
+    if not mode:
+        mode = "random" if bool(shadow_cfg.get("random_albedo", False)) else "grayscale"
+    if mode not in {"random", "grayscale", "height_based"}:
+        raise ValueError(f"Unsupported shadow_geometry albedo mode: {mode}")
+
+    merged = dict(shadow_cfg)
+    merged.update(albedo_cfg)
+    return mode, merged
+
+
+def _height_color_palette(palette_cfg: object) -> np.ndarray:
+    default = np.array(
+        [
+            [0.16, 0.30, 0.14],
+            [0.36, 0.52, 0.20],
+            [0.56, 0.47, 0.27],
+            [0.72, 0.69, 0.60],
+        ],
+        dtype=np.float32,
+    )
+    if palette_cfg is None or str(palette_cfg).lower() in {"default", "natural"}:
+        return default
+    if isinstance(palette_cfg, dict):
+        colors = [palette_cfg.get(key) for key in ("low", "mid", "high", "very_high") if palette_cfg.get(key) is not None]
+    else:
+        colors = palette_cfg
+    palette = np.asarray(colors, dtype=np.float32)
+    if palette.ndim != 2 or palette.shape[0] < 2 or palette.shape[1] != 3:
+        raise ValueError("height_color_palette must contain at least two RGB colors")
+    if float(palette.max()) > 1.0:
+        palette = palette / 255.0
+    return np.clip(palette, 0.0, 1.0).astype(np.float32)
+
+
+def _height_based_shadow_geometry_albedo(
+    height: np.ndarray,
+    normals: np.ndarray,
+    rng: np.random.Generator,
+    albedo_cfg: dict,
+) -> np.ndarray:
+    size = height.shape[0]
+    palette = _height_color_palette(albedo_cfg.get("height_color_palette", "natural"))
+    height_color_strength = float(np.clip(float(albedo_cfg.get("height_color_strength", 0.45)), 0.0, 1.0))
+    color_noise_strength = float(max(0.0, albedo_cfg.get("color_noise_strength", 0.08)))
+    texture_strength = float(max(0.0, albedo_cfg.get("texture_strength", 0.12)))
+
+    h = _normalize(height)
+    scaled = h * (palette.shape[0] - 1)
+    lower = np.floor(scaled).astype(np.int32)
+    upper = np.clip(lower + 1, 0, palette.shape[0] - 1)
+    lower = np.clip(lower, 0, palette.shape[0] - 1)
+    mix = (scaled - lower)[..., None]
+    height_color = (1.0 - mix) * palette[lower] + mix * palette[upper]
+
+    base_luma = 0.62 + 0.12 * (_normalize(_sample_fractal_noise(size, 3, 5, 18, rng)) - 0.5)
+    albedo = (1.0 - height_color_strength) * base_luma[..., None] + height_color_strength * height_color
+
+    slope = 1.0 - np.clip(normals[..., 2], 0.0, 1.0)
+    slope_rock = np.array([0.50, 0.47, 0.40], dtype=np.float32)
+    slope_mix = np.clip(slope * 1.4, 0.0, 0.35)[..., None]
+    albedo = (1.0 - slope_mix) * albedo + slope_mix * slope_rock
+
+    if texture_strength > 0.0:
+        coarse = _normalize(_sample_fractal_noise(size, 4, 4, 20, rng))
+        fine = _normalize(_sample_fractal_noise(size, 3, 16, 40, rng))
+        texture = 0.65 * coarse + 0.35 * fine
+        texture = 1.0 + texture_strength * (texture[..., None] - 0.5)
+        albedo *= texture
+
+    if color_noise_strength > 0.0:
+        color_noise = rng.normal(0.0, color_noise_strength, size=(size, size, 3)).astype(np.float32)
+        color_noise = cv2.GaussianBlur(color_noise, (0, 0), sigmaX=max(1.0, size / 96.0), sigmaY=max(1.0, size / 96.0))
+        albedo += color_noise
+
+    return np.clip(albedo, 0.05, 1.0).astype(np.float32)
+
+
+def _shadow_geometry_albedo(
+    height: np.ndarray,
+    normals: np.ndarray,
+    rng: np.random.Generator,
+    shadow_cfg: dict,
+) -> tuple[np.ndarray, str]:
+    size = height.shape[0]
+    mode, albedo_cfg = _shadow_albedo_options(shadow_cfg)
+    if mode == "grayscale":
+        return np.full((size, size, 3), 0.72, dtype=np.float32), mode
+    if mode == "height_based":
+        return _height_based_shadow_geometry_albedo(height, normals, rng, albedo_cfg), mode
+
+    brightness_min = float(albedo_cfg.get("albedo_brightness_min", 0.55))
+    brightness_max = float(albedo_cfg.get("albedo_brightness_max", 1.35))
+    contrast_min = float(albedo_cfg.get("albedo_contrast_min", 0.55))
+    contrast_max = float(albedo_cfg.get("albedo_contrast_max", 1.55))
+    pattern_strength = float(albedo_cfg.get("albedo_pattern_strength", 0.55))
+    color_noise_min = float(albedo_cfg.get("albedo_color_noise_strength_min", 0.03))
+    color_noise_max = float(albedo_cfg.get("albedo_color_noise_strength_max", 0.12))
+    if "albedo_noise_strength_min" in albedo_cfg or "albedo_noise_strength_max" in albedo_cfg:
+        noise_min = float(albedo_cfg.get("albedo_noise_strength_min", albedo_cfg.get("albedo_noise_strength", 0.04)))
+        noise_max = float(albedo_cfg.get("albedo_noise_strength_max", albedo_cfg.get("albedo_noise_strength", 0.04)))
+        noise_strength = float(rng.uniform(noise_min, noise_max))
+    else:
+        noise_strength = float(albedo_cfg.get("albedo_noise_strength", 0.04))
+
+    natural_palettes = [
+        np.array([[0.25, 0.42, 0.18], [0.42, 0.52, 0.25], [0.46, 0.37, 0.22], [0.55, 0.54, 0.48]], dtype=np.float32),
+        np.array([[0.34, 0.47, 0.22], [0.58, 0.52, 0.30], [0.50, 0.36, 0.20], [0.62, 0.60, 0.52]], dtype=np.float32),
+        np.array([[0.20, 0.34, 0.20], [0.30, 0.45, 0.28], [0.38, 0.32, 0.24], [0.50, 0.50, 0.45]], dtype=np.float32),
+        np.array([[0.48, 0.42, 0.26], [0.62, 0.54, 0.34], [0.43, 0.30, 0.18], [0.58, 0.55, 0.47]], dtype=np.float32),
+    ]
+    palette = natural_palettes[int(rng.integers(0, len(natural_palettes)))].copy()
+    palette *= rng.uniform(0.90, 1.12, size=(1, 3)).astype(np.float32)
+    brightness = float(rng.uniform(brightness_min, brightness_max))
+    contrast = float(rng.uniform(contrast_min, contrast_max))
+    coarse_grid = int(rng.integers(3, 10))
+    weights = rng.uniform(0.0, 1.0, size=(coarse_grid, coarse_grid, palette.shape[0])).astype(np.float32)
+    weights = cv2.resize(weights, (size, size), interpolation=cv2.INTER_CUBIC)
+    weights = cv2.GaussianBlur(weights, (0, 0), sigmaX=max(3.0, size / 18.0), sigmaY=max(3.0, size / 18.0))
+    weights = np.clip(weights, 0.0, None)
+    weights = weights / np.maximum(weights.sum(axis=-1, keepdims=True), 1e-6)
+
+    albedo = np.tensordot(weights, palette, axes=([-1], [0])).astype(np.float32)
+    pattern = rng.uniform(0.0, 1.0, size=(coarse_grid, coarse_grid, 1)).astype(np.float32)
+    pattern = cv2.resize(pattern, (size, size), interpolation=cv2.INTER_CUBIC)
+    if pattern.ndim == 2:
+        pattern = pattern[..., None]
+    pattern = cv2.GaussianBlur(pattern, (0, 0), sigmaX=max(3.0, size / 18.0), sigmaY=max(3.0, size / 18.0))
+    if pattern.ndim == 2:
+        pattern = pattern[..., None]
+    pattern = _normalize(pattern)
+
+    albedo = albedo * (1.0 - pattern_strength + pattern_strength * (0.45 + 1.1 * pattern))
+    albedo = (albedo - 0.5) * contrast + 0.5
+
+    color_noise_strength = float(rng.uniform(color_noise_min, color_noise_max))
+    color_noise = rng.normal(0.0, color_noise_strength, size=(size, size, 3)).astype(np.float32)
+    color_noise = cv2.GaussianBlur(color_noise, (0, 0), sigmaX=max(1.0, size / 96.0), sigmaY=max(1.0, size / 96.0))
+    albedo = albedo + color_noise
+    albedo *= brightness
+
+    if bool(albedo_cfg.get("albedo_noise_texture", True)) and noise_strength > 0.0:
+        fine_noise = rng.normal(0.0, noise_strength, size=(size, size, 3)).astype(np.float32)
+        albedo = albedo + fine_noise
+
+    return np.clip(albedo, 0.05, 1.0).astype(np.float32), mode
 
 
 def _shadow_geometry_height(
@@ -357,14 +507,16 @@ def _generate_shadow_geometry_dataset(config: dict, rng: np.random.Generator, da
     terrain_cfg = config["terrain"]
     render_cfg = dict(config["render"])
     camera_cfg = config["camera"]
-    shadow_cfg = config.get("shadow_geometry", {})
+    shadow_cfg = dict(config.get("shadow_geometry", {}))
+    if "albedo" not in shadow_cfg and "albedo" in config:
+        shadow_cfg["albedo"] = config["albedo"]
 
     manifest_rows: list[dict[str, str]] = []
     num_samples = int(dataset_cfg["num_samples"])
     image_size = int(dataset_cfg["image_size"])
     train_ratio = float(dataset_cfg["train_ratio"])
     include_noon = bool(shadow_cfg.get("include_noon", False))
-    random_albedo = bool(shadow_cfg.get("random_albedo", False))
+    albedo_mode, _ = _shadow_albedo_options(shadow_cfg)
 
     render_cfg.setdefault("ambient", 0.24)
     render_cfg.setdefault("diffuse", 0.95)
@@ -391,7 +543,7 @@ def _generate_shadow_geometry_dataset(config: dict, rng: np.random.Generator, da
             shadow_suns=[(sunrise_az, sunrise_el), (sunset_az, sunset_el)],
         )
         normals = _compute_normals(height, z_scale=float(terrain_meta["elevation_scale_m"]) / 1000.0)
-        albedo = _shadow_geometry_albedo(image_size, rng, random_albedo)
+        albedo, albedo_mode = _shadow_geometry_albedo(height, normals, rng, shadow_cfg)
 
         rgb, shadow = _render_rgb(height, normals, sunrise_az, sunrise_el, render_cfg, rng, albedo=albedo)
         rgb_alt, shadow_alt = _render_rgb(height, normals, sunset_az, sunset_el, render_cfg, rng, albedo=albedo)
@@ -400,6 +552,8 @@ def _generate_shadow_geometry_dataset(config: dict, rng: np.random.Generator, da
 
         _save_png(sample_dir / "gray.png", gray)
         _save_png(sample_dir / "gray_alt.png", gray_alt)
+        _save_png(sample_dir / "rgb.png", rgb)
+        _save_png(sample_dir / "rgb_alt.png", rgb_alt)
         _save_png(sample_dir / "shadow_mask.png", shadow)
         _save_png(sample_dir / "shadow_mask_alt.png", shadow_alt)
         if include_noon:
@@ -430,7 +584,8 @@ def _generate_shadow_geometry_dataset(config: dict, rng: np.random.Generator, da
             "camera_fov_deg": float(rng.uniform(float(camera_cfg["fov_deg_min"]), float(camera_cfg["fov_deg_max"]))),
             "timestamp": f"shadow_geometry_{index:05d}",
             "image_size": image_size,
-            "random_albedo": random_albedo,
+            "random_albedo": albedo_mode == "random",
+            "albedo_mode": albedo_mode,
             "lighting_setup": "sunrise_sunset_noon" if include_noon else "sunrise_sunset",
         }
         meta = _metadata_for_sample(sample_id, terrain_meta, camera_meta)
@@ -443,8 +598,8 @@ def _generate_shadow_geometry_dataset(config: dict, rng: np.random.Generator, da
                 "sample_id": sample_id,
                 "split": split,
                 "sample_dir": f"samples/{sample_id}",
-                "image_relpath": "gray.png",
-                "image_alt_relpath": "gray_alt.png",
+                "image_relpath": "rgb.png",
+                "image_alt_relpath": "rgb_alt.png",
                 "height_relpath": "height.npy",
                 "shadow_relpath": "shadow_mask.png",
                 "shadow_alt_relpath": "shadow_mask_alt.png",
@@ -473,7 +628,7 @@ def generate_dataset(config: dict) -> None:
     samples_root = dataset_root / "samples"
     ensure_dir(samples_root)
 
-    if str(dataset_cfg.get("dataset_mode", "")).lower() == "shadow_geometry":
+    if str(dataset_cfg.get("dataset_mode", "")).lower() in {"shadow_geometry", "rgb_shadow_geometry"}:
         _generate_shadow_geometry_dataset(config, rng, dataset_root, samples_root)
         return
 

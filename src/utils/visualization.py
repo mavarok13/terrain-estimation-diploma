@@ -28,19 +28,27 @@ def save_training_preview(
                 target = batch["height"][i, 0].cpu().numpy()
                 pred = preds[i, 0].cpu().numpy()
                 error = np.abs(pred - target)
+                mae = float(error.mean())
+                rmse = float(np.sqrt(np.mean((pred - target) ** 2)))
 
                 fig, axes = plt.subplots(1, 4, figsize=(14, 4))
                 axes[0].imshow(np.clip(image, 0.0, 1.0))
                 axes[0].set_title("RGB")
-                axes[1].imshow(target, cmap="terrain")
+                axes[1].imshow(target, cmap="terrain", vmin=0.0, vmax=1.0)
                 axes[1].set_title("Target")
-                axes[2].imshow(pred, cmap="terrain")
+                axes[2].imshow(pred, cmap="terrain", vmin=0.0, vmax=1.0)
                 axes[2].set_title("Prediction")
                 axes[3].imshow(error, cmap="magma")
                 axes[3].set_title("Abs Error")
+                fig.suptitle(
+                    f"pred min/max: {pred.min():.3f}/{pred.max():.3f} | "
+                    f"target min/max: {target.min():.3f}/{target.max():.3f} | "
+                    f"MAE: {mae:.4f} | RMSE: {rmse:.4f}",
+                    fontsize=9,
+                )
                 for ax in axes:
                     ax.axis("off")
-                fig.tight_layout()
+                fig.tight_layout(rect=(0, 0, 1, 0.92))
                 fig.savefig(Path(output_dir) / f"{sample_id}_overview.png", dpi=160)
                 plt.close(fig)
 
@@ -56,7 +64,7 @@ def save_inference_outputs(output_dir: str | Path, image: torch.Tensor, predicti
     fig, axes = plt.subplots(1, 2, figsize=(10, 4))
     axes[0].imshow(image.permute(1, 2, 0).cpu().numpy())
     axes[0].set_title("Input RGB")
-    axes[1].imshow(prediction, cmap="terrain")
+    axes[1].imshow(prediction, cmap="terrain", vmin=0.0, vmax=1.0)
     axes[1].set_title("Predicted Height")
     for ax in axes:
         ax.axis("off")

@@ -64,6 +64,36 @@ def _make_dataloaders(config: dict, repo_root: Path) -> tuple[TerrainDataset, Te
     return train_ds, val_ds, train_loader, val_loader
 
 
+def _load_compatible_model_state(model: torch.nn.Module, checkpoint: dict) -> list[str]:
+    source_state = checkpoint["model_state"]
+    target_state = model.state_dict()
+    compatible_state = {}
+    skipped = []
+
+    for name, value in source_state.items():
+        if name not in target_state:
+            skipped.append(f"{name} (missing in model)")
+            continue
+        if tuple(value.shape) != tuple(target_state[name].shape):
+            skipped.append(f"{name} checkpoint{tuple(value.shape)} != model{tuple(target_state[name].shape)}")
+            continue
+        compatible_state[name] = value
+
+    missing = [name for name in target_state if name not in compatible_state]
+    model.load_state_dict(compatible_state, strict=False)
+    skipped.extend(name for name in missing if name not in source_state)
+    return skipped
+
+
+def _set_encoder_frozen(model: torch.nn.Module, frozen: bool) -> None:
+    for module_name in ("enc1", "enc2", "enc3", "enc4", "bottleneck"):
+        module = getattr(model, module_name, None)
+        if module is None:
+            continue
+        for parameter in module.parameters():
+            parameter.requires_grad = not frozen
+
+
 def _run_epoch(
     model: torch.nn.Module,
     loader: DataLoader,
@@ -150,23 +180,49 @@ def train_from_config(config: dict, resume_checkpoint: str | Path | None = None)
 
     if resume_checkpoint is not None:
         ckpt = load_checkpoint(resolve_repo_path(resume_checkpoint, repo_root), map_location=device)
-        model.load_state_dict(ckpt["model_state"])
-        optimizer.load_state_dict(ckpt["optimizer_state"])
-        start_epoch = int(ckpt["epoch"]) + 1
-        best_val = float(ckpt.get("best_val_loss", best_val))
+        skipped = _load_compatible_model_state(model, ckpt)
+        if skipped:
+            print("Skipped checkpoint layers:")
+            for layer in skipped:
+                print(f"  - {layer}")
+        else:
+            optimizer.load_state_dict(ckpt["optimizer_state"])
+            start_epoch = int(ckpt["epoch"]) + 1
+            best_val = float(ckpt.get("best_val_loss", best_val))
 
-        if history_path.exists():
+        if start_epoch > 0 and history_path.exists():
             with history_path.open("r", encoding="utf-8") as handle:
                 history = json.load(handle)
             history = history[:start_epoch]
 
-        print(f"Resuming training from epoch {start_epoch + 1}/{epochs}")
+        if start_epoch > 0:
+            print(f"Resuming training from epoch {start_epoch + 1}/{epochs}")
+        else:
+            print("Loaded compatible checkpoint weights; starting fine-tuning from epoch 1")
+
+    pretrained_checkpoint = config["training"].get("pretrained_checkpoint")
+    if resume_checkpoint is None and pretrained_checkpoint:
+        ckpt = load_checkpoint(resolve_repo_path(pretrained_checkpoint, repo_root), map_location=device)
+        skipped = _load_compatible_model_state(model, ckpt)
+        print(f"Loaded compatible pretrained weights from {pretrained_checkpoint}")
+        if skipped:
+            print("Skipped checkpoint layers:")
+            for layer in skipped:
+                print(f"  - {layer}")
 
     if start_epoch >= epochs:
         print(f"Checkpoint already covers {start_epoch} epochs. Configured epochs: {epochs}. Nothing to do.")
         return
 
     for epoch in range(start_epoch, epochs):
+        freeze_encoder_epochs = int(config["training"].get("freeze_encoder_epochs", 0))
+        encoder_frozen = epoch < freeze_encoder_epochs
+        _set_encoder_frozen(model, encoder_frozen)
+        if epoch == start_epoch and encoder_frozen:
+            print(f"Freezing encoder for first {freeze_encoder_epochs} epoch(s)")
+        if epoch == freeze_encoder_epochs and freeze_encoder_epochs > 0:
+            print("Unfreezing encoder")
+
         train_metrics = _run_epoch(model, train_loader, criterion, device, optimizer)
         val_metrics = _run_epoch(model, val_loader, criterion, device, optimizer=None)
 

@@ -1,7 +1,7 @@
 dataset:
-  image_size: 480
+  image_size: 256
   use_pair: false
-  use_metadata: true
+  use_metadata: false
   metadata_keys:
     - sun_azimuth_deg
     - sun_elevation_deg

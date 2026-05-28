@@ -12,6 +12,7 @@ SUPPORTED_INPUT_MODES = {
     "grayscale_shadow_sun": 4,
     "grayscale_pair_shadow_sun": 7,
     "grayscale_pair_shadowmask_sun": 8,
+    "rgb_pair_shadowmask_sun": 12,
     "rgb_pair": 6,
     "grayscale_pair": 2,
     "rgb_pair_metadata": 10,
@@ -58,6 +59,7 @@ def input_mode_requires_pair(input_mode: str) -> bool:
         "grayscale_pair",
         "grayscale_pair_shadow_sun",
         "grayscale_pair_shadowmask_sun",
+        "rgb_pair_shadowmask_sun",
         "rgb_pair_metadata",
         "rgb_pair_full_metadata",
     }
@@ -68,13 +70,19 @@ def input_mode_requires_metadata(input_mode: str) -> bool:
         "grayscale_shadow_sun",
         "grayscale_pair_shadow_sun",
         "grayscale_pair_shadowmask_sun",
+        "rgb_pair_shadowmask_sun",
         "rgb_pair_metadata",
         "rgb_pair_full_metadata",
     }
 
 
 def input_mode_requires_shadow(input_mode: str) -> bool:
-    return input_mode in {"grayscale_shadow_sun", "grayscale_pair_shadow_sun", "grayscale_pair_shadowmask_sun"}
+    return input_mode in {
+        "grayscale_shadow_sun",
+        "grayscale_pair_shadow_sun",
+        "grayscale_pair_shadowmask_sun",
+        "rgb_pair_shadowmask_sun",
+    }
 
 
 def rgb_to_grayscale(image: torch.Tensor) -> torch.Tensor:
@@ -157,6 +165,18 @@ def build_model_input_for_mode(
             channels.append(shadow_mask_alt)
         channels.append(meta_maps)
         return torch.cat(channels, dim=0)
+    if input_mode == "rgb_pair_shadowmask_sun":
+        if image_alt is None:
+            raise ValueError(f"{input_mode} requires an alternate image")
+        if shadow_mask is None or shadow_mask_alt is None:
+            raise ValueError(f"{input_mode} requires primary and alternate shadow masks")
+        if metadata is None:
+            raise ValueError(f"{input_mode} requires metadata")
+        if metadata.ndim != 1:
+            raise ValueError(f"Expected metadata tensor [C], got {tuple(metadata.shape)}")
+        h, w = image.shape[1], image.shape[2]
+        meta_maps = metadata[:, None, None].expand(metadata.shape[0], h, w)
+        return torch.cat([image, image_alt, shadow_mask, shadow_mask_alt, meta_maps], dim=0)
     if input_mode in {"rgb_pair_metadata", "rgb_pair_full_metadata"}:
         if image_alt is None:
             raise ValueError(f"{input_mode} requires an alternate image")
