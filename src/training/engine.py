@@ -4,10 +4,12 @@ import json
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from src.dataset import TerrainDataset, resolve_input_mode
+from src.dataset.input_modes import build_model_input_for_mode, input_channels_for_mode, resolve_input_mode as resolve_checkpoint_input_mode
 from src.models import UNet
 from src.training.losses import CombinedLoss
 from src.utils.io import ensure_dir, load_checkpoint, save_checkpoint, resolve_repo_path
@@ -64,13 +66,19 @@ def _make_dataloaders(config: dict, repo_root: Path) -> tuple[TerrainDataset, Te
     return train_ds, val_ds, train_loader, val_loader
 
 
-def _load_compatible_model_state(model: torch.nn.Module, checkpoint: dict) -> list[str]:
+def _load_compatible_model_state(
+    model: torch.nn.Module,
+    checkpoint: dict,
+    prefixes: tuple[str, ...] | None = None,
+) -> list[str]:
     source_state = checkpoint["model_state"]
     target_state = model.state_dict()
     compatible_state = {}
     skipped = []
 
     for name, value in source_state.items():
+        if prefixes is not None and not name.startswith(prefixes):
+            continue
         if name not in target_state:
             skipped.append(f"{name} (missing in model)")
             continue
@@ -83,6 +91,60 @@ def _load_compatible_model_state(model: torch.nn.Module, checkpoint: dict) -> li
     model.load_state_dict(compatible_state, strict=False)
     skipped.extend(name for name in missing if name not in source_state)
     return skipped
+
+
+def _input_mode_from_checkpoint(checkpoint: dict) -> str:
+    train_config = checkpoint["train_config"]
+    return resolve_checkpoint_input_mode(train_config.get("training", {}), train_config.get("dataset", {}))
+
+
+def _make_model_from_checkpoint(checkpoint: dict, device: torch.device) -> tuple[torch.nn.Module, str]:
+    train_config = checkpoint["train_config"]
+    dataset_cfg = train_config["dataset"]
+    model_cfg = train_config["model"]
+    input_mode = _input_mode_from_checkpoint(checkpoint)
+    metadata_keys = list(dataset_cfg.get("metadata_keys", []))
+    input_channels = int(model_cfg.get("input_channels", input_channels_for_mode(input_mode, metadata_keys)))
+    model = UNet(
+        in_channels=input_channels,
+        out_channels=1,
+        base_channels=int(model_cfg["base_channels"]),
+    ).to(device)
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+    for parameter in model.parameters():
+        parameter.requires_grad = False
+    return model, input_mode
+
+
+def _build_teacher_input(batch: dict[str, torch.Tensor | str], input_mode: str, device: torch.device) -> torch.Tensor:
+    image = batch["image"].to(device)
+    image_alt = batch.get("image_alt")
+    metadata = batch.get("metadata")
+    shadow_mask = batch.get("shadow_mask")
+    shadow_mask_alt = batch.get("shadow_mask_alt")
+
+    if isinstance(image_alt, torch.Tensor):
+        image_alt = image_alt.to(device)
+    if isinstance(metadata, torch.Tensor):
+        metadata = metadata.to(device)
+    if isinstance(shadow_mask, torch.Tensor):
+        shadow_mask = shadow_mask.to(device)
+    if isinstance(shadow_mask_alt, torch.Tensor):
+        shadow_mask_alt = shadow_mask_alt.to(device)
+
+    inputs = [
+        build_model_input_for_mode(
+            image[idx],
+            image_alt[idx] if isinstance(image_alt, torch.Tensor) else None,
+            metadata[idx] if isinstance(metadata, torch.Tensor) else None,
+            input_mode,
+            shadow_mask=shadow_mask[idx] if isinstance(shadow_mask, torch.Tensor) else None,
+            shadow_mask_alt=shadow_mask_alt[idx] if isinstance(shadow_mask_alt, torch.Tensor) else None,
+        )
+        for idx in range(image.shape[0])
+    ]
+    return torch.stack(inputs, dim=0)
 
 
 def _set_encoder_frozen(model: torch.nn.Module, frozen: bool) -> None:
@@ -100,6 +162,10 @@ def _run_epoch(
     criterion: CombinedLoss,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
+    teacher_model: torch.nn.Module | None = None,
+    teacher_input_mode: str | None = None,
+    distill_weight: float = 0.0,
+    gt_weight: float = 1.0,
 ) -> dict[str, float]:
     is_train = optimizer is not None
     model.train(is_train)
@@ -116,7 +182,15 @@ def _run_epoch(
 
         with torch.set_grad_enabled(is_train):
             preds = model(inputs)
-            loss = criterion(preds, targets)
+            gt_loss = criterion(preds, targets)
+            loss = gt_weight * gt_loss
+            distill_loss = None
+            if is_train and teacher_model is not None and teacher_input_mode is not None and distill_weight > 0.0:
+                teacher_inputs = _build_teacher_input(batch, teacher_input_mode, device)
+                with torch.no_grad():
+                    teacher_preds = teacher_model(teacher_inputs)
+                distill_loss = F.l1_loss(preds, teacher_preds)
+                loss = loss + distill_weight * distill_loss
             if is_train:
                 optimizer.zero_grad(set_to_none=True)
                 loss.backward()
@@ -126,6 +200,9 @@ def _run_epoch(
         total_items += batch_size
         batch_result = batch_metrics(preds.detach(), targets.detach(), shadow_mask.detach())
         batch_result["loss"] = float(loss.item())
+        batch_result["gt_loss"] = float(gt_loss.item())
+        if distill_loss is not None:
+            batch_result["distill_loss"] = float(distill_loss.item())
         merge_metric_sums(metric_sums, batch_result, batch_size)
         progress.set_description(f"{'train' if is_train else 'val'} loss={loss.item():.4f}")
 
@@ -171,6 +248,33 @@ def train_from_config(config: dict, resume_checkpoint: str | Path | None = None)
         f"Training input_mode={input_mode} input_channels={input_channels} "
         f"train_samples={len(train_ds)} val_samples={len(val_ds)} output_dir={output_dir}"
     )
+
+    distill_cfg = config.get("distillation", {}) or {}
+    teacher_model = None
+    teacher_input_mode = None
+    distill_weight = 0.0
+    gt_weight = 1.0
+    teacher_checkpoint_path = distill_cfg.get("teacher_checkpoint")
+    if bool(distill_cfg.get("enabled", False)):
+        if not teacher_checkpoint_path:
+            raise ValueError("distillation.enabled requires distillation.teacher_checkpoint")
+        teacher_ckpt = load_checkpoint(resolve_repo_path(teacher_checkpoint_path, repo_root), map_location=device)
+        teacher_model, teacher_input_mode = _make_model_from_checkpoint(teacher_ckpt, device)
+        distill_weight = float(distill_cfg.get("distill_weight", 0.3))
+        gt_weight = float(distill_cfg.get("gt_weight", 1.0))
+        print(
+            f"Distillation enabled teacher_input_mode={teacher_input_mode} "
+            f"gt_weight={gt_weight} distill_weight={distill_weight}"
+        )
+
+        if bool(distill_cfg.get("encoder_transfer", True)):
+            prefixes = ("enc", "bottleneck") if bool(distill_cfg.get("encoder_only", True)) else None
+            skipped = _load_compatible_model_state(model, teacher_ckpt, prefixes=prefixes)
+            print(f"Initialized student from teacher checkpoint: {teacher_checkpoint_path}")
+            if skipped:
+                print("Skipped teacher layers:")
+                for layer in skipped:
+                    print(f"  - {layer}")
 
     best_val = float("inf")
     history: list[dict[str, float | int]] = []
@@ -223,7 +327,17 @@ def train_from_config(config: dict, resume_checkpoint: str | Path | None = None)
         if epoch == freeze_encoder_epochs and freeze_encoder_epochs > 0:
             print("Unfreezing encoder")
 
-        train_metrics = _run_epoch(model, train_loader, criterion, device, optimizer)
+        train_metrics = _run_epoch(
+            model,
+            train_loader,
+            criterion,
+            device,
+            optimizer,
+            teacher_model=teacher_model,
+            teacher_input_mode=teacher_input_mode,
+            distill_weight=distill_weight,
+            gt_weight=gt_weight,
+        )
         val_metrics = _run_epoch(model, val_loader, criterion, device, optimizer=None)
 
         row = {"epoch": epoch + 1}

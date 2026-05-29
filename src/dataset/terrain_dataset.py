@@ -191,6 +191,8 @@ class TerrainDataset(Dataset):
             metadata = encode_pair_metadata_maps(meta)
         elif self.input_mode == "rgb_pair_full_metadata":
             metadata = torch.from_numpy(encode_metadata_vector(meta, self.metadata_keys))
+        elif self.use_metadata:
+            metadata = encode_pair_metadata_maps(meta)
 
         image_t = torch.from_numpy(image.transpose(2, 0, 1)).float()
         image_alt_t = torch.from_numpy(image_alt.transpose(2, 0, 1)).float() if image_alt is not None else None
