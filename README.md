@@ -43,22 +43,6 @@ terrain_height_estimation/
   requirements.txt
 ```
 
-## What Can Be Done In One Evening
-
-Realistic MVP scope:
-
-1. Generate a synthetic dataset with DEM, RGB, shadow mask, normals, and metadata.
-2. Train a metadata-aware U-Net baseline.
-3. Run inference on one image and save outputs.
-4. Compare error inside and outside shadowed regions.
-
-Not realistic in one evening:
-
-1. Strong real-world generalization to satellite or UAV imagery.
-2. Fully validated multi-illumination fusion.
-3. Robust teacher-student semi-supervised learning.
-4. Complete TSE-Net reproduction.
-
 ## Environment
 
 Install dependencies:
