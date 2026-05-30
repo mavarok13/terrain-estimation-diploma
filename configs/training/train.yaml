@@ -1,0 +1,33 @@
+seed: 42
+dataset:
+  root: data/generated/mvp_dataset
+  train_manifest: data/generated/mvp_dataset/train.csv
+  val_manifest: data/generated/mvp_dataset/val.csv
+  image_size: 480
+  use_pair: true
+  use_metadata: true
+  metadata_keys:
+    - sun_azimuth_deg
+    - sun_elevation_deg
+    - camera_azimuth_deg
+    - camera_pitch_deg
+    - camera_roll_deg
+    - camera_altitude_m
+    - camera_fov_deg
+  shadow_augmentation: true
+training:
+  input_mode: rgb_pair_full_metadata
+  output_dir: outputs/mvp_baseline
+  epochs: 35
+  batch_size: 8
+  num_workers: 4
+  lr: 0.0003
+  weight_decay: 0.0001
+  device: auto
+  save_visualizations: 4
+model:
+  base_channels: 32
+loss:
+  l1_weight: 1.0
+  grad_weight: 0.5
+  ssim_weight: 0.1

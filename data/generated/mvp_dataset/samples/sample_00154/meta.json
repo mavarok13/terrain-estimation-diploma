@@ -1,0 +1,20 @@
+{
+  "sample_id": "sample_00154",
+  "terrain_id": "sample_00154",
+  "lighting_setup": "primary_alt_pair",
+  "peak_count": 8,
+  "valley_count": 3,
+  "blur_sigma": 1.8317856482768768,
+  "elevation_scale_m": 419.6310260521253,
+  "sun_azimuth_deg": 113.1741631083462,
+  "sun_elevation_deg": 33.101143816921635,
+  "sun_azimuth_alt_deg": 277.2250357670233,
+  "sun_elevation_alt_deg": 14.947356781126322,
+  "camera_azimuth_deg": 269.30718777870874,
+  "camera_pitch_deg": 23.79303304473858,
+  "camera_roll_deg": 2.802021988290626,
+  "camera_altitude_m": 445.3282667096242,
+  "camera_fov_deg": 24.970013710055092,
+  "timestamp": "synthetic_00154",
+  "image_size": 480
+}

@@ -1,0 +1,72 @@
+seed: 42
+dataset:
+  name: simple_geometry_d3_nr
+  dataset_mode: rgb_shadow_geometry
+  output_root: data/generated
+  num_samples: 500
+  image_size: 256
+  train_ratio: 0.85
+  write_alt_image: true
+terrain:
+  octave_count: 4
+  base_grid_min: 8
+  base_grid_max: 32
+  ridge_weight: 0.15
+  valley_count_min: 0
+  valley_count_max: 1
+  peak_count_min: 1
+  peak_count_max: 4
+  blur_sigma_min: 1.5
+  blur_sigma_max: 3.5
+  elevation_scale_m_min: 120.0
+  elevation_scale_m_max: 900.0
+render:
+  ambient: 0.27
+  diffuse: 1.6
+  shadow_strength: 0.39
+  fog_strength: 0.1
+  exposure: 1.05
+  gamma: 0.83
+  sun_elevation_min_deg: 8.0
+  sun_elevation_max_deg: 24.0
+  alt_sun_azimuth_delta_deg_min: 120.0
+  alt_sun_azimuth_delta_deg_max: 180.0
+camera:
+  azimuth_deg_min: 0.0
+  azimuth_deg_max: 360.0
+  pitch_deg_min: 0.0
+  pitch_deg_max: 0.0
+  roll_deg_min: 0.0
+  roll_deg_max: 0.0
+  altitude_m_min: 900.0
+  altitude_m_max: 1100.0
+  fov_deg_min: 40.0
+  fov_deg_max: 40.0
+shadow_geometry:
+  difficulty: 3
+  hill_shapes:
+    - circular
+    - elongated
+    - ridge
+    - plateau
+  albedo:
+    mode: height_based
+    height_color_strength: 0.45
+    color_noise_strength: 0.07
+    texture_strength: 0.14
+    height_color_palette:
+      low: [0.16, 0.30, 0.14]
+      mid: [0.36, 0.52, 0.20]
+      high: [0.56, 0.47, 0.27]
+      very_high: [0.72, 0.69, 0.60]
+  include_noon: false
+  radius_min: 0.16
+  radius_max: 0.30
+  height_min: 0.45
+  height_max: 1.0
+  height_blur_sigma: 1.2
+  max_shadow_overlap: 0.01
+  elevation_scale_m_min: 120.0
+  elevation_scale_m_max: 700.0
+  sun_elevation_min_deg: 8.0
+  sun_elevation_max_deg: 24.0
