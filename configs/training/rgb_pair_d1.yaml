@@ -1,0 +1,30 @@
+seed: 42
+dataset:
+  root: data/generated/simple_geometry_d1
+  train_manifest: data/generated/simple_geometry_d1/train.csv
+  val_manifest: data/generated/simple_geometry_d1/val.csv
+  image_size: 256
+  use_pair: true
+  use_metadata: true
+  metadata_keys:
+    - sun_azimuth_deg
+    - sun_elevation_deg
+    - sun_azimuth_alt_deg
+    - sun_elevation_alt_deg
+  shadow_augmentation: false
+training:
+  input_mode: rgb_pair
+  output_dir: outputs/rgb_pair_simple_geometry_d1
+  epochs: 15
+  batch_size: 8
+  num_workers: 4
+  lr: 0.0003
+  weight_decay: 0.0001
+  device: auto
+  save_visualizations: 2
+model:
+  base_channels: 32
+loss:
+  l1_weight: 1.0
+  grad_weight: 0.5
+  ssim_weight: 0.1
