@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 
 try:
-    from PySide6.QtCore import QProcess, QProcessEnvironment, QTimer, Qt
-    from PySide6.QtGui import QPixmap, QTextCursor
+    from PySide6.QtCore import QPoint, QProcess, QProcessEnvironment, QRect, QTimer, Qt, Signal
+    from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPen, QPixmap, QTextCursor
     from PySide6.QtWidgets import (
         QApplication,
         QCheckBox,
@@ -89,6 +89,7 @@ class HeightSurfaceView(QWidget):
         z = height[::effective_stride, ::effective_stride]
         if smooth_surface:
             z = self._smooth_height_map(z)
+        z = np.flipud(z)
         z = z - float(np.nanmin(z))
         z_range = float(np.nanmax(z))
         if z_range > 1e-6:
@@ -199,6 +200,164 @@ class HeightSurfaceView(QWidget):
         ) / 16.0
 
 
+class SquareImagePreview(QLabel):
+    selectionChanged = Signal()
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self._source_pixmap: QPixmap | None = None
+        self._image_path: Path | None = None
+        self._crop_rect: QRect | None = None
+        self._drag_start: QPoint | None = None
+        self.setCursor(Qt.CrossCursor)
+        self.setMouseTracking(True)
+
+    @property
+    def image_path(self) -> Path | None:
+        return self._image_path
+
+    def set_image(self, path: Path) -> bool:
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            self._source_pixmap = None
+            self._image_path = None
+            self._crop_rect = None
+            self.setText(f"Не удалось открыть:\n{path}")
+            self.update()
+            self.selectionChanged.emit()
+            return False
+
+        self._source_pixmap = pixmap
+        self._image_path = path
+        self.reset_selection()
+        return True
+
+    def reset_selection(self) -> bool:
+        if self._source_pixmap is None:
+            return False
+        width = self._source_pixmap.width()
+        height = self._source_pixmap.height()
+        side = min(width, height)
+        self._crop_rect = QRect((width - side) // 2, (height - side) // 2, side, side)
+        self.update()
+        self.selectionChanged.emit()
+        return True
+
+    def selection_description(self) -> str:
+        if self._source_pixmap is None or self._crop_rect is None:
+            return "Выберите изображение, затем выделите квадрат на превью."
+        rect = self._crop_rect
+        return f"Квадрат: x={rect.x()}, y={rect.y()}, сторона={rect.width()} px. Перетащите мышью на превью для выбора."
+
+    def save_selected_crop(self, path: Path) -> QRect | None:
+        if self._source_pixmap is None or self._crop_rect is None:
+            return None
+        crop = self._source_pixmap.copy(self._crop_rect)
+        if not crop.save(str(path)):
+            return None
+        return QRect(self._crop_rect)
+
+    def paintEvent(self, event) -> None:  # noqa: ANN001 - Qt callback signature
+        if self._source_pixmap is None:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(17, 17, 17))
+        target = self._display_rect()
+        painter.drawPixmap(target, self._source_pixmap)
+
+        if self._crop_rect is not None:
+            overlay = QColor(0, 0, 0, 115)
+            selection = self._source_to_display_rect(self._crop_rect)
+            painter.fillRect(QRect(target.left(), target.top(), target.width(), selection.top() - target.top()), overlay)
+            painter.fillRect(QRect(target.left(), selection.bottom() + 1, target.width(), target.bottom() - selection.bottom()), overlay)
+            painter.fillRect(QRect(target.left(), selection.top(), selection.left() - target.left(), selection.height()), overlay)
+            painter.fillRect(QRect(selection.right() + 1, selection.top(), target.right() - selection.right(), selection.height()), overlay)
+            painter.setPen(QPen(QColor(255, 214, 80), 3))
+            painter.drawRect(selection)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.LeftButton or self._source_pixmap is None:
+            return
+        point = self._point_to_source(event.position().toPoint())
+        if point is None:
+            return
+        self._drag_start = point
+        self._crop_rect = QRect(point.x(), point.y(), 1, 1)
+        self.update()
+        self.selectionChanged.emit()
+
+    def mouseMoveEvent(self, event: QMouseEvent) -> None:
+        if self._drag_start is None or self._source_pixmap is None:
+            return
+        point = self._point_to_source(event.position().toPoint())
+        if point is None:
+            return
+        self._crop_rect = self._square_from_points(self._drag_start, point)
+        self.update()
+        self.selectionChanged.emit()
+
+    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        if event.button() != Qt.LeftButton:
+            return
+        self._drag_start = None
+
+    def _display_rect(self) -> QRect:
+        if self._source_pixmap is None:
+            return self.contentsRect()
+        area = self.contentsRect()
+        width = self._source_pixmap.width()
+        height = self._source_pixmap.height()
+        scale = min(area.width() / width, area.height() / height)
+        display_width = max(1, int(width * scale))
+        display_height = max(1, int(height * scale))
+        return QRect(
+            area.x() + (area.width() - display_width) // 2,
+            area.y() + (area.height() - display_height) // 2,
+            display_width,
+            display_height,
+        )
+
+    def _point_to_source(self, point: QPoint) -> QPoint | None:
+        if self._source_pixmap is None:
+            return None
+        display = self._display_rect()
+        if not display.contains(point):
+            return None
+        x = round((point.x() - display.x()) * self._source_pixmap.width() / display.width())
+        y = round((point.y() - display.y()) * self._source_pixmap.height() / display.height())
+        x = min(max(int(x), 0), self._source_pixmap.width() - 1)
+        y = min(max(int(y), 0), self._source_pixmap.height() - 1)
+        return QPoint(x, y)
+
+    def _source_to_display_rect(self, rect: QRect) -> QRect:
+        display = self._display_rect()
+        if self._source_pixmap is None:
+            return display
+        scale_x = display.width() / self._source_pixmap.width()
+        scale_y = display.height() / self._source_pixmap.height()
+        return QRect(
+            int(display.x() + rect.x() * scale_x),
+            int(display.y() + rect.y() * scale_y),
+            max(1, int(rect.width() * scale_x)),
+            max(1, int(rect.height() * scale_y)),
+        )
+
+    def _square_from_points(self, start: QPoint, end: QPoint) -> QRect:
+        if self._source_pixmap is None:
+            return QRect()
+        width = self._source_pixmap.width()
+        height = self._source_pixmap.height()
+        side = max(abs(end.x() - start.x()), abs(end.y() - start.y()), 1)
+        side = min(side, width, height)
+        x = start.x() if end.x() >= start.x() else start.x() - side
+        y = start.y() if end.y() >= start.y() else start.y() - side
+        x = min(max(x, 0), width - side)
+        y = min(max(y, 0), height - side)
+        return QRect(x, y, side, side)
+
+
 class TerrainViewerWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -220,10 +379,22 @@ class TerrainViewerWindow(QMainWindow):
         self.checkpoint_edit = QLineEdit(str(self.repo_root / "outputs/rgb_student_distill/checkpoints/best.pt"))
         self.config_edit = QLineEdit(str(self.repo_root / "configs/inference/default.yaml"))
         self.output_root_edit = QLineEdit(str(self.repo_root / "outputs/gui_runs"))
+        self.crop_info_label = QLabel("Выберите изображение, затем выделите квадрат на превью.")
+        self.crop_info_label.setWordWrap(True)
+        self.crop_reset_button = QPushButton("Центральный квадрат")
+        self.crop_reset_button.clicked.connect(self._reset_crop_selection)
+
+        crop_layout = QHBoxLayout()
+        crop_layout.addWidget(self.crop_info_label, 1)
+        crop_layout.addWidget(self.crop_reset_button)
+        crop_layout.setContentsMargins(0, 0, 0, 0)
+        crop_row = QWidget()
+        crop_row.setLayout(crop_layout)
 
         input_box = QGroupBox("Входные данные")
         form = QFormLayout(input_box)
         form.addRow("Изображение:", self._path_row(self.image_edit, self._browse_image))
+        form.addRow("Область:", crop_row)
         form.addRow("Чекпоинт:", self._path_row(self.checkpoint_edit, self._browse_checkpoint))
         form.addRow("Конфиг:", self._path_row(self.config_edit, self._browse_config))
         form.addRow("Папка результатов:", self._path_row(self.output_root_edit, self._browse_output_root))
@@ -276,7 +447,8 @@ class TerrainViewerWindow(QMainWindow):
         left_panel = QWidget()
         left_panel.setLayout(left_layout)
 
-        self.input_preview = QLabel("Входное изображение")
+        self.input_preview = SquareImagePreview("Входное изображение")
+        self.input_preview.selectionChanged.connect(self._update_crop_info)
         self.height_preview = QLabel("2D карта высот")
         for label in (self.input_preview, self.height_preview):
             label.setAlignment(Qt.AlignCenter)
@@ -354,6 +526,13 @@ class TerrainViewerWindow(QMainWindow):
         if path:
             self.output_root_edit.setText(path)
 
+    def _reset_crop_selection(self) -> None:
+        self.input_preview.reset_selection()
+        self._update_crop_info()
+
+    def _update_crop_info(self) -> None:
+        self.crop_info_label.setText(self.input_preview.selection_description())
+
     def _run_inference(self) -> None:
         image_path = Path(self.image_edit.text().strip())
         checkpoint_path = Path(self.checkpoint_edit.text().strip())
@@ -365,11 +544,27 @@ class TerrainViewerWindow(QMainWindow):
             self._show_error("Файл не найден", "\n".join(str(path) for path in missing))
             return
 
+        if self.input_preview.image_path != image_path and not self.input_preview.set_image(image_path):
+            self._show_error("Ошибка изображения", f"Не удалось открыть изображение:\n{image_path}")
+            return
+
         run_name = datetime.now().strftime("run_%Y%m%d_%H%M%S")
         self.current_run_dir = output_root / run_name
+        try:
+            self.current_run_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self._show_error("Ошибка папки результатов", str(exc))
+            return
+
+        selected_image_path = self.current_run_dir / "selected_region.png"
+        selected_rect = self.input_preview.save_selected_crop(selected_image_path)
+        if selected_rect is None:
+            self._show_error("Ошибка области", "Не удалось сохранить выбранную квадратную область изображения.")
+            return
+
         self.current_height = None
         self.surface_canvas.plot_placeholder()
-        self._set_preview(self.input_preview, image_path)
+        self.input_preview.update()
         self.height_preview.setText("Ожидание результата...")
         self.log_edit.clear()
 
@@ -381,7 +576,7 @@ class TerrainViewerWindow(QMainWindow):
             "--checkpoint",
             str(checkpoint_path),
             "--image",
-            str(image_path),
+            str(selected_image_path),
             f"inference.output_dir={self.current_run_dir}",
         ]
 
@@ -398,6 +593,10 @@ class TerrainViewerWindow(QMainWindow):
 
         self.run_button.setEnabled(False)
         self.status_label.setText("Нейросеть считает карту высот...")
+        self._append_log(
+            f"Selected square: x={selected_rect.x()}, y={selected_rect.y()}, "
+            f"side={selected_rect.width()} px -> {selected_image_path}\n"
+        )
         self._append_log(f"$ {sys.executable} {' '.join(args)}\n")
         self.process.start()
 
@@ -475,6 +674,9 @@ class TerrainViewerWindow(QMainWindow):
             self.redraw_timer.start()
 
     def _set_preview(self, label: QLabel, path: Path) -> None:
+        if isinstance(label, SquareImagePreview):
+            label.set_image(path)
+            return
         pixmap = QPixmap(str(path))
         if pixmap.isNull():
             label.setText(f"Не удалось открыть:\n{path}")
