@@ -37,6 +37,14 @@ def _read_mask(path: Path, image_size: int) -> torch.Tensor:
     return torch.from_numpy(array[None, ...]).float()
 
 
+def _zero_min_height(prediction: np.ndarray) -> np.ndarray:
+    prediction = np.asarray(prediction, dtype=np.float32)
+    min_value = float(np.nanmin(prediction))
+    if not np.isfinite(min_value):
+        return np.nan_to_num(prediction, nan=0.0, posinf=1.0, neginf=0.0).astype(np.float32)
+    return np.clip(prediction - min_value, 0.0, 1.0).astype(np.float32)
+
+
 def run_inference(
     config: dict,
     checkpoint_path: str | Path,
@@ -106,6 +114,9 @@ def run_inference(
     ).unsqueeze(0)
     with torch.no_grad():
         pred = model(model_input).squeeze(0).squeeze(0).cpu().numpy().astype(np.float32)
+
+    if bool(config.get("inference", {}).get("zero_min_height", True)):
+        pred = _zero_min_height(pred)
 
     output_dir = resolve_repo_path(config["inference"]["output_dir"], repo_root)
     ensure_dir(output_dir)

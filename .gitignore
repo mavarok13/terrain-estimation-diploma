@@ -79,3 +79,10 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# codebase-index cache (machine-local; do not commit)
+.claude/cache/codebase-index/
+outputs/
+*.pt
+*.pth
+*.ckpt
