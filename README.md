@@ -1,249 +1,232 @@
 # Terrain Height Estimation
 
-Python MVP for monocular terrain height estimation from synthetic remote-sensing imagery.
+![Release](https://img.shields.io/github/v/release/mavarok13/terrain-estimation-diploma?label=Release)
+![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)
 
-This repository implements:
 
-1. A fast procedural dataset generator.
-2. A PyTorch training pipeline for dense height regression.
-3. An inference script for predicting a height map from one image.
+Desktop and CLI prototype for estimating a terrain height map from remote-sensing-style imagery.
 
-The MVP is intentionally practical:
+The project combines a PyTorch dense regression model, a synthetic terrain data generator, training and inference pipelines, and a Qt desktop viewer for interactive demonstrations.
 
-1. Single-image inference is the main baseline.
-2. The data format already supports an optional second illumination image.
-3. Metadata-conditioned inference is supported through sun and camera parameters.
-4. Shadow masks are generated and used for diagnostics and augmentation, but monocular shadow ambiguity is not considered solved.
+![Introducing image](./assets/demo.png)
+
+## Why This Project Exists
+
+Estimating elevation from a single image is an ambiguous computer vision problem: lighting, shadows, color, snow, and terrain material can look similar while representing different geometry. This repository explores that problem in a controlled setting by generating synthetic terrain, training U-Net-based regressors, and visualizing predicted height maps in 2D and 3D.
+
+The current implementation is a research and portfolio prototype, not a production DEM reconstruction system.
+
+## Demo Application
+
+The GUI is implemented in `apps/terrain_viewer_qt.py` using PySide6 and pyqtgraph/OpenGL.
+
+It provides:
+
+1. Image, checkpoint, config, and output-folder selection.
+2. Interactive square crop selection on the input preview.
+3. Inference launched in a separate process so the UI remains responsive.
+4. Side-by-side 2D preview of the selected image and predicted height map.
+5. OpenGL 3D surface visualization with height scale, grid stride, point-density, and smoothing controls.
+6. Run log and saved outputs for each GUI inference session.
+
+<!-- Portfolio screenshot suggestion: save the GUI screenshot as docs/assets/terrain-viewer.png and add it near this section. -->
+
+## What This Demonstrates
+
+1. End-to-end ML application design: data generation, model training, inference, and UI integration.
+2. PyTorch model implementation for dense image-to-image regression.
+3. Config-driven experiments with YAML and command-line overrides.
+4. Synthetic data generation with terrain height maps, lighting, shadows, metadata, and train/validation manifests.
+5. Desktop application development with Qt, OpenGL visualization, file dialogs, logs, and subprocess management.
+6. Practical handling of monocular ambiguity through paired-image modes, shadow masks, metadata conditioning, augmentation, and explicit validation metrics.
+
+## Tech Stack
+
+1. Python
+2. PyTorch
+3. NumPy, OpenCV, Pillow
+4. Matplotlib
+5. PyYAML
+6. PySide6
+7. pyqtgraph and PyOpenGL
 
 ## Repository Layout
 
 ```text
 terrain_height_estimation/
+  apps/
+    terrain_viewer_qt.py          # Qt desktop viewer
   configs/
-    generation/
-    inference/
-    training/
+    generation/                   # dataset generation configs
+    inference/                    # inference configs
+    training/                     # training configs
   data/
-    generated/
-    raw/
-    splits/
-  outputs/
+    generated/                    # generated datasets, if present locally
+    real_images/                  # local demo images, if present locally
   scripts/
-    generate_dataset.py
-    infer.py
-    train.py
+    generate_dataset.py           # synthetic dataset generation entry point
+    infer.py                      # CLI inference entry point
+    train.py                      # training entry point
   src/
-    dataset/
-    generation/
-    inference/
-    models/
-    training/
-    utils/
-  README.md
-  requirements.txt
+    dataset/                      # dataset loading and input-mode assembly
+    generation/                   # procedural terrain/rendering logic
+    inference/                    # checkpoint loading and prediction logic
+    models/                       # U-Net model definition
+    training/                     # training loop, losses, distillation support
+    utils/                        # config, IO, metrics, metadata, visualization
+  stage1-best/                    # local saved checkpoints, if present
+  stage3-best/                    # local saved checkpoints, if present
+  stage4-best/                    # local saved checkpoints, if present
 ```
 
-## Environment
+Large generated datasets, outputs, and checkpoints are usually not suitable for committing to Git. The repository `.gitignore` excludes `outputs/` and common checkpoint extensions.
 
-Install dependencies:
+## Installation
+
+Create and activate a virtual environment, then install the required packages.
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 1. Generate A Dataset
+For the desktop viewer, install GUI dependencies as well:
 
-Default config:
+```bash
+pip install -r requirements-gui.txt
+```
+
+On Windows PowerShell, activate the environment with:
+
+```powershell
+.venv\Scripts\Activate.ps1
+```
+
+## Run The GUI
+
+```bash
+python apps/terrain_viewer_qt.py
+```
+
+The default GUI workflow is intended for single-image inference checkpoints. Pair, metadata, and shadow-mask models can be used from the CLI by passing the required auxiliary inputs.
+
+## Generate A Synthetic Dataset
 
 ```bash
 python scripts/generate_dataset.py --config configs/generation/mvp.yaml
 ```
 
-This creates a dataset under `data/generated/mvp_dataset/` with one folder per sample.
-
-Each sample contains:
+This writes a dataset under `data/generated/mvp_dataset/` by default. Each generated sample can include:
 
 1. `rgb.png`
-2. `rgb_alt.png` if enabled
+2. `rgb_alt.png`
 3. `height.npy`
 4. `height_vis.png`
 5. `normal.npy`
 6. `shadow_mask.png`
 7. `meta.json`
 
-The generator also writes:
+The generator also writes dataset manifests such as `manifest.csv`, `train.csv`, and `val.csv`.
 
-1. `manifest.csv`
-2. `train.csv`
-3. `val.csv`
+For a smaller smoke-test dataset, override the sample count:
 
-## 2. Train The Baseline
+```bash
+python scripts/generate_dataset.py --config configs/generation/mvp.yaml dataset.num_samples=16
+```
+
+## Train A Model
 
 ```bash
 python scripts/train.py --config configs/training/mvp.yaml
 ```
 
-Input modes can be selected with `training.input_mode`:
+Training outputs are written to `training.output_dir`, which is `outputs/mvp_baseline/` in the default MVP config. The training pipeline saves:
 
-1. `rgb`: `rgb.png`, 3 channels.
-2. `grayscale`: `rgb.png` converted to one grayscale channel, 1 channel.
-3. `grayscale_shadow_sun`: grayscale image plus primary shadow mask plus normalized sun azimuth/elevation maps, 4 channels.
-4. `grayscale_pair_shadow_sun`: primary/alternate grayscale plus primary shadow mask plus both sun directions, 7 channels.
-5. `grayscale_pair_shadowmask_sun`: primary/alternate grayscale plus both shadow masks plus both sun directions, 8 channels.
-6. `rgb_pair`: morning/evening or primary/alternate RGB concatenated, 6 channels.
-7. `grayscale_pair`: morning/evening or primary/alternate grayscale concatenated, 2 channels.
-8. `rgb_pair_metadata`: RGB pair plus normalized sun azimuth/elevation maps for both images, 10 channels.
-9. `rgb_pair_full_metadata`: RGB pair plus all configured `dataset.metadata_keys`; this is the legacy-compatible metadata baseline.
+1. `checkpoints/best.pt`
+2. `checkpoints/last.pt`
+3. `samples/epoch_xxx/` preview images
+4. `history.json`
 
-Experiment commands:
-
-```bash
-python scripts/train.py --config configs/train.yaml training.input_mode=rgb training.output_dir=outputs/ablation_rgb
-python scripts/train.py --config configs/train.yaml training.input_mode=grayscale training.output_dir=outputs/ablation_grayscale
-python scripts/train.py --config configs/train.yaml training.input_mode=grayscale_shadow_sun training.output_dir=outputs/ablation_grayscale_shadow_sun
-python scripts/train.py --config configs/train.yaml training.input_mode=grayscale_pair_shadow_sun training.output_dir=outputs/ablation_grayscale_pair_shadow_sun
-python scripts/train.py --config configs/train.yaml training.input_mode=grayscale_pair_shadowmask_sun training.output_dir=outputs/ablation_grayscale_pair_shadowmask_sun
-python scripts/train.py --config configs/train.yaml training.input_mode=rgb_pair training.output_dir=outputs/ablation_rgb_pair
-python scripts/train.py --config configs/train.yaml training.input_mode=grayscale_pair training.output_dir=outputs/ablation_grayscale_pair
-python scripts/train.py --config configs/train.yaml training.input_mode=rgb_pair_metadata training.output_dir=outputs/ablation_rgb_pair_metadata
-python scripts/train.py --config configs/train.yaml training.input_mode=rgb_pair_full_metadata training.output_dir=outputs/mvp_baseline
-```
-
-Use a separate `training.output_dir` for each mode. Otherwise checkpoints and preview images from different experiments will overwrite each other and become hard to compare.
-
-Resume from the last saved checkpoint:
+Resume training from a saved checkpoint:
 
 ```bash
 python scripts/train.py --config configs/training/mvp.yaml --resume outputs/mvp_baseline/checkpoints/last.pt
 ```
 
-Outputs are written to `outputs/mvp_baseline/`:
+## Run CLI Inference
 
-1. `checkpoints/best.pt`
-2. `checkpoints/last.pt`
-3. `samples/epoch_xxx/`
-4. `history.json`
-
-## 3. Run Inference
+The default MVP training config uses `rgb_pair_full_metadata`, so inference needs the primary image, alternate image, and metadata file:
 
 ```bash
-python scripts/infer.py \
-  --config configs/inference/default.yaml \
-  --checkpoint outputs/mvp_baseline/checkpoints/best.pt \
-  --image data/generated/mvp_dataset/samples/sample_00000/rgb.png \
-  --metadata data/generated/mvp_dataset/samples/sample_00000/meta.json
+python scripts/infer.py --config configs/inference/default.yaml --checkpoint outputs/mvp_baseline/checkpoints/best.pt --image data/generated/mvp_dataset/samples/sample_00000/rgb.png --image-alt data/generated/mvp_dataset/samples/sample_00000/rgb_alt.png --metadata data/generated/mvp_dataset/samples/sample_00000/meta.json
 ```
 
-Inference saves:
+Inference writes the configured output directory, defaulting to `outputs/inference/`, with:
 
 1. `pred_height.npy`
 2. `pred_height.png`
 3. `prediction_overview.png`
 
-For pair modes, pass `--image-alt`. For `rgb_pair_metadata`, also pass `--metadata` with `sun_azimuth_deg`, `sun_elevation_deg`, `sun_azimuth_alt_deg`, and `sun_elevation_alt_deg`. For shadow-mask modes, pass `--metadata` and `--shadow-mask`; `grayscale_pair_shadowmask_sun` also needs `--shadow-mask-alt`.
-
-## Shadow Geometry Curriculum
-
-Generate controlled shadow-to-height training data:
+For checkpoints that also require shadow masks, pass the mask files explicitly:
 
 ```bash
-python scripts/generate_dataset.py --config configs/generation/shadow_geometry.yaml
+python scripts/infer.py --config configs/inference/default.yaml --checkpoint stage4-best/best.pt --image data/generated/simple_geometry_d3_nr/samples/sample_00000/rgb.png --image-alt data/generated/simple_geometry_d3_nr/samples/sample_00000/rgb_alt.png --metadata data/generated/simple_geometry_d3_nr/samples/sample_00000/meta.json --shadow-mask data/generated/simple_geometry_d3_nr/samples/sample_00000/shadow_mask.png --shadow-mask-alt data/generated/simple_geometry_d3_nr/samples/sample_00000/shadow_mask_alt.png
 ```
 
-Train on the strongest anti-shortcut mode:
+The exact required arguments depend on the `input_mode` saved in the checkpoint configuration.
 
-```bash
-python scripts/train.py --config configs/training/shadow_geometry.yaml
-```
+## Supported Input Modes
 
-The `shadow_geometry` dataset mode writes grayscale sunrise/sunset renders, matching shadow masks, one shared `height.npy`, and metadata with both sun directions. Difficulty is controlled by `shadow_geometry.difficulty`:
+The dataset and inference code support several input representations:
 
-1. `1`: one smooth hill, flat background, strong shadows, no intentional overlap.
-2. `2`: two or three smooth hills with slight overlap allowed.
-3. `3`: procedural terrain fallback for later curriculum stages.
+1. `rgb`: one RGB image.
+2. `grayscale`: one grayscale image.
+3. `rgb_pair`: two RGB images concatenated channel-wise.
+4. `grayscale_pair`: two grayscale images.
+5. `grayscale_shadow_sun`: grayscale image, shadow mask, and sun metadata.
+6. `grayscale_pair_shadow_sun`: image pair, primary shadow mask, and sun metadata.
+7. `grayscale_pair_shadowmask_sun`: image pair, two shadow masks, and sun metadata.
+8. `rgb_pair_shadowmask_sun`: RGB image pair, two shadow masks, and sun metadata.
+9. `rgb_pair_metadata`: RGB pair and compact sun metadata.
+10. `rgb_pair_full_metadata`: RGB pair and configured capture metadata.
 
-Use overrides to advance curriculum stages, for example:
+## Model And Training Details
 
-```bash
-python scripts/generate_dataset.py --config configs/generation/shadow_geometry.yaml shadow_geometry.difficulty=2 dataset.name=shadow_geometry_d2
-python scripts/generate_dataset.py --config configs/generation/shadow_geometry.yaml shadow_geometry.difficulty=3 dataset.name=shadow_geometry_d3
-```
+The model in `src/models/unet.py` is a U-Net-style encoder-decoder network with skip connections and a single-channel sigmoid output for normalized height prediction.
 
-## Diagnostic Hill Dataset
+Training uses:
 
-Generate controlled single-hill samples:
+1. `AdamW` optimizer.
+2. Combined loss with L1, gradient, and SSIM components.
+3. Validation metrics including MAE, RMSE, gradient error, shadow MAE, non-shadow MAE, and boundary MAE.
+4. Optional checkpoint resume and compatible-weight loading.
+5. Optional teacher-student distillation support in the training engine.
 
-```bash
-python scripts/generate_hill_diagnostic_dataset.py --config configs/hill_diagnostic.yaml
-```
+## Synthetic Data Strategy
 
-The diagnostic dataset writes `data/generated/hill_diagnostic/` by default. Each sample contains:
+The procedural generator creates normalized height maps and renders terrain-like RGB images using surface normals, lighting, shadows, albedo variation, camera metadata, and optional alternate illumination.
 
-1. `rgb.png`
-2. `rgb_morning.png`
-3. `rgb_evening.png`
-4. `height.npy`
-5. `height.png`
-6. `shadow_mask.png`
-7. `metadata.json`
+The generation configs include controls for:
 
-The generator covers gaussian hills, cones/frustums, ridges, asymmetric hills, double hills, and crater/valley variants. Variants include same geometry with different colors, same color with different suns, morning/evening pairs, and different geometry with similar color.
+1. Terrain smoothness, ridges, peaks, valleys, and elevation scale.
+2. Sun azimuth/elevation and alternate illumination.
+3. Shadow strength and rendering parameters.
+4. Albedo randomization to reduce simple color-to-height shortcuts.
+5. Curriculum-style shadow geometry datasets.
 
-Quick sanity training on the diagnostic dataset:
+## Known Limitations
 
-```bash
-python scripts/train.py --config configs/train.yaml \
-  dataset.root=data/generated/hill_diagnostic \
-  dataset.train_manifest=data/generated/hill_diagnostic/train.csv \
-  dataset.val_manifest=data/generated/hill_diagnostic/val.csv \
-  dataset.image_size=256 \
-  training.input_mode=rgb_pair_metadata \
-  training.output_dir=outputs/hill_diagnostic_sanity \
-  training.epochs=3
-```
+1. Monocular height estimation remains fundamentally ambiguous, especially in shadowed or textureless areas.
+2. The model is trained primarily on synthetic data, so real-image predictions should be treated as qualitative demonstrations unless validated against real elevation data.
+3. The GUI default flow passes a single selected crop to inference; models that require image pairs, metadata, or shadow masks need the CLI path or additional UI wiring.
+4. Large datasets and checkpoints are local artifacts and may need to be regenerated or downloaded separately when cloning the repository.
 
-Anti-color-cheating generator options are available under `generation` in `configs/generation/mvp.yaml`:
+## Roadmap
 
-1. `randomize_albedo_independent_of_height`
-2. `same_dem_multiple_albedos`
-3. `same_dem_multiple_suns`
-4. `shuffle_palettes`
-5. `disable_height_based_snow`
-6. `albedo_noise_strength`
-
-## Metadata Conditioning
-
-The baseline can condition on metadata by tiling encoded metadata values into constant feature maps.
-
-Angle fields are encoded as `sin/cos` pairs to avoid the `0 deg` / `360 deg` discontinuity.
-
-Default metadata fields:
-
-1. `sun_azimuth_deg`
-2. `sun_elevation_deg`
-3. `camera_azimuth_deg`
-4. `camera_pitch_deg`
-5. `camera_roll_deg`
-6. `camera_altitude_m`
-7. `camera_fov_deg`
-
-## Shadow Handling In The MVP
-
-The halo issue around shadow boundaries is treated explicitly:
-
-1. Synthetic data includes a terrain-based shadow mask.
-2. Sun direction is randomized aggressively.
-3. Terrain albedo is randomized independently from shape.
-4. Training includes gradient loss.
-5. Validation reports MAE inside shadows and outside shadows.
-6. Training can perturb shadow darkness to reduce over-reliance on dark pixels.
-
-This reduces the risk of the network learning a simple darkness-to-height shortcut, but it does not remove the fundamental ambiguity of monocular hidden terrain.
-
-## Planned Extensions
-
-1. Better procedural terrain generation with stronger ridge and erosion priors.
-2. True oblique rendering and more realistic camera models.
-3. Two-image sunrise/sunset fusion.
-4. Classification-regression head inspired by TSE-Net.
-5. Teacher-student and pseudo-label filtering for semi-supervised learning.
+1. Add a committed GUI screenshot and short demo GIF/video for the portfolio page.
+2. Provide a small downloadable checkpoint compatible with the default single-image GUI workflow.
+3. Add automated tests for config loading, dataset records, and inference smoke tests.
+4. Add real DEM-based validation when paired image/elevation data is available.
+5. Improve packaging for non-technical users, for example with a desktop launcher or installer.
